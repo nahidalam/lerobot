@@ -134,7 +134,7 @@ def rename_checkpoint_keys(checkpoint: dict, rename_str: str):
     return new_checkpoint
 
 
-def load_smolvla(
+def load_gemma3nvla(
     model: torch.nn.Module,
     filename: str | os.PathLike,
     *,
@@ -371,7 +371,7 @@ class Gemma3nVLAPolicy(PreTrainedPolicy):
         del state_dict
         # logging.info(f"load_result {load_result}")
 
-        return load_smolvla(
+        return load_gemma3nvla(
             model,
             model_file,
             device=map_location,
