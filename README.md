@@ -145,6 +145,12 @@ For instance, to install 🤗 LeRobot with aloha and pusht, use:
 pip install -e ".[aloha, pusht]"
 ```
 
+To install 🤗 LeRobot with smolvla dependencies, use:
+
+```bash
+pip install -e ".[smolvla]"
+```
+
 To use [Weights and Biases](https://docs.wandb.ai/quickstart) for experiment tracking, log in with
 
 ```bash
