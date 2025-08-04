@@ -42,6 +42,8 @@ test-end-to-end:
 	${MAKE} DEVICE=$(DEVICE) test-tdmpc-ete-eval
 	${MAKE} DEVICE=$(DEVICE) test-smolvla-ete-train
 	${MAKE} DEVICE=$(DEVICE) test-smolvla-ete-eval
+	${MAKE} DEVICE=$(DEVICE) test-gemma3nvla-ete-train
+	${MAKE} DEVICE=$(DEVICE) test-gemma3nvla-ete-eval
 
 test-act-ete-train:
 	python -m lerobot.scripts.train \
@@ -173,6 +175,39 @@ test-smolvla-ete-train:
 test-smolvla-ete-eval:
 	python -m lerobot.scripts.eval \
 		--policy.path=tests/outputs/smolvla/checkpoints/000004/pretrained_model \
+		--policy.device=$(DEVICE) \
+		--env.type=aloha \
+		--env.episode_length=5 \
+		--eval.n_episodes=1 \
+		--eval.batch_size=1
+
+
+test-gemma3nvla-ete-train:
+	python -m lerobot.scripts.train \
+		--policy.type=gemma3nvla \
+		--policy.n_action_steps=20 \
+		--policy.chunk_size=20 \
+		--policy.device=$(DEVICE) \
+		--policy.push_to_hub=false \
+		--env.type=aloha \
+		--env.episode_length=5 \
+		--dataset.repo_id=lerobot/aloha_sim_transfer_cube_human \
+		--dataset.image_transforms.enable=true \
+		--dataset.episodes="[0]" \
+		--batch_size=2 \
+		--steps=4 \
+		--eval_freq=2 \
+		--eval.n_episodes=1 \
+		--eval.batch_size=1 \
+		--save_freq=2 \
+		--save_checkpoint=true \
+		--log_freq=1 \
+		--wandb.enable=false \
+		--output_dir=tests/outputs/gemma3nvla/
+
+test-gemma3nvla-ete-eval:
+	python -m lerobot.scripts.eval \
+		--policy.path=tests/outputs/gemma3nvla/checkpoints/000004/pretrained_model \
 		--policy.device=$(DEVICE) \
 		--env.type=aloha \
 		--env.episode_length=5 \
