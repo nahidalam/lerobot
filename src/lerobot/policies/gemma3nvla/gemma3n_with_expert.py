@@ -178,6 +178,9 @@ class Gemma3nModel(Gemma3nPreTrainedModel):
         Returns:
             image_features (`torch.Tensor`): Image feature tensor of shape `(num_images, image_length, embed_dim)`).
         """
+        print(">> [DEBUG] img device:", pixel_values.device)
+        print(">> [DEBUG] vision_tower weights device:", next(self.vision_tower.parameters()).device)
+
         vision_outputs = self.vision_tower(
             pixel_values=pixel_values, do_pooling=False, return_dict=True
         ).last_hidden_state
