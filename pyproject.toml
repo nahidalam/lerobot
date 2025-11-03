@@ -59,9 +59,9 @@ keywords = ["lerobot", "huggingface", "robotics",  "machine learning", "artifici
 dependencies = [
 
     # Hugging Face dependencies
-    "datasets>=4.0.0,<4.2.0",
+    "datasets>=4.0.0",
     "diffusers>=0.27.2,<0.36.0",
-    "huggingface-hub[hf-transfer,cli]>=0.34.2,<0.36.0",
+    "huggingface-hub[hf-transfer,cli]>=0.34.2",
     "accelerate>=1.10.0,<2.0.0",
 
     # Core dependencies
@@ -88,6 +88,7 @@ dependencies = [
     "deepdiff>=7.0.1,<9.0.0",
     "imageio[ffmpeg]>=2.34.0,<3.0.0",
     "termcolor>=2.4.0,<4.0.0",
+    "rich>=14.2.0,<15.0.0",
 ]
 
 # Optional dependencies
@@ -97,6 +98,10 @@ dependencies = [
 pygame-dep = ["pygame>=2.5.1,<2.7.0"]
 placo-dep = ["placo>=0.9.6,<0.10.0"]
 transformers-dep = ["transformers>=4.53.0,<5.0.0"]
+transformers-git = [
+    "transformers @ git+https://github.com/huggingface/transformers.git",
+    "huggingface-hub[hf-transfer,cli]>=1.0.0rc6"
+]
 grpcio-dep = ["grpcio==1.73.1", "protobuf==6.31.0"] # TODO: Bumb dependency (compatible with wandb)
 
 # Motors
