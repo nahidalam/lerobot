@@ -27,6 +27,7 @@ from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 class PI05MemerConfig(PreTrainedConfig):
 
     # High Level Policy Settings (MEMER-specific)
+    camera_key_high_level_policy: str = "observation.images.camera_0"
     use_high_level_policy: bool = False  # Enable/disable high-level policy for MEMER
     high_level_policy_name: str = "Qwen/Qwen3-VL-8B-Instruct"  # VLM for high-level planning
     recent_frames_window: int = 10  # Number of recent frames to keep (N in paper)

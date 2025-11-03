@@ -1148,7 +1148,7 @@ class PI05MemerPolicy(PreTrainedPolicy):
             general_task: High-level task description
         """
         # Get the first camera image as the representative frame for this timestep
-        first_camera_key = list(self.config.image_features.keys())[0]
+        first_camera_key = self.config.camera_key_high_level_policy
         if first_camera_key in batch:
             # Get first image from batch (batch_size=1 during inference)
             frame = batch[first_camera_key][0]  # Shape: (C, H, W)
