@@ -28,7 +28,7 @@ class PI05MemerConfig(PreTrainedConfig):
 
     # High Level Policy Settings (MEMER-specific)
     use_high_level_policy: bool = False  # Enable/disable high-level policy for MEMER
-    high_level_policy_name: str = "Qwen/Qwen2-VL-7B-Instruct"  # VLM for high-level planning
+    high_level_policy_name: str = "Qwen/Qwen3-VL-8B-Instruct"  # VLM for high-level planning
     recent_frames_window: int = 10  # Number of recent frames to keep (N in paper)
     max_keyframes: int = 8  # Maximum number of keyframes to maintain
     keyframe_distance_threshold: int = 10  # Distance threshold for clustering in build_visual_memory

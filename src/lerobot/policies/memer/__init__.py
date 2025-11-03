@@ -17,7 +17,7 @@
 from .configuration_pi05 import PI05MemerConfig
 from .high_level_policy import HighLevelPolicy, build_visual_memory
 from .modeling_pi05 import PI05MemerPolicy
-from .processor_pi05 import make_pi05_pre_post_processors
+from .processor_pi05 import make_pi05_memer_pre_post_processors # NOTE: renamed from make_pi05_pre_post_processors
 
 __all__ = [
     "PI05MemerConfig",

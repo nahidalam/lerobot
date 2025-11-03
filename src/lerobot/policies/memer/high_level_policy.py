@@ -1,19 +1,3 @@
-#!/usr/bin/env python
-
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import json
 import logging
 from typing import List, Tuple
@@ -23,6 +7,95 @@ import torch
 from PIL import Image
 
 from lerobot.policies.memer.configuration_pi05 import PI05MemerConfig
+
+
+def parse_vlm_json_output(
+    output: str, frame_indices: List[int], num_keyframes: int = 0
+) -> Tuple[str, List[int]]:
+    """
+    Parse the VLM output to extract subtask and candidate frame indices.
+    
+    The output is expected to be in JSON format:
+    {"current_subtask": "description", "keyframe_positions": [1, 3, 5]}
+    
+    Args:
+        output: Raw text output from the VLM (JSON string)
+        frame_indices: Available frame indices for recent frames
+        num_keyframes: Number of keyframes (not used currently, kept for compatibility)
+        
+    Returns:
+        subtask: Extracted subtask description
+        candidate_indices: List of selected frame indices
+    """
+    subtask = ""
+    candidate_positions = []
+    
+    try:
+        # Try to parse as JSON
+        # First, clean the output - remove any markdown code blocks if present
+        cleaned_output = output.strip()
+        if cleaned_output.startswith("```"):
+            # Remove markdown code blocks
+            lines = cleaned_output.split("\n")
+            # Find the actual JSON content
+            json_lines = []
+            in_code_block = False
+            for line in lines:
+                if line.strip().startswith("```"):
+                    in_code_block = not in_code_block
+                    continue
+                if in_code_block or not line.strip().startswith("```"):
+                    json_lines.append(line)
+            cleaned_output = "\n".join(json_lines).strip()
+        
+        # Try to find JSON object in the output
+        # Look for the first { and last }
+        start_idx = cleaned_output.find("{")
+        end_idx = cleaned_output.rfind("}")
+        
+        if start_idx != -1 and end_idx != -1:
+            json_str = cleaned_output[start_idx:end_idx + 1]
+            parsed = json.loads(json_str)
+            
+            # Extract subtask
+            subtask = parsed.get("current_subtask", "")
+            
+            # Extract keyframe positions
+            candidate_positions = parsed.get("keyframe_positions", [])
+            
+            # Ensure positions are integers
+            candidate_positions = [int(pos) for pos in candidate_positions]
+            
+            logging.info(f"Successfully parsed JSON: subtask='{subtask}', positions={candidate_positions}")
+        else:
+            logging.warning("Could not find JSON object in output")
+            
+    except json.JSONDecodeError as e:
+        logging.warning(f"Could not parse JSON output: {e}")
+        logging.debug(f"Output was: {output}")
+    except Exception as e:
+        logging.warning(f"Error parsing model output: {e}")
+        logging.debug(f"Output was: {output}")
+    
+    # Convert 1-indexed positions to actual frame indices
+    candidate_indices = []
+    for pos in candidate_positions:
+        # Positions are 1-indexed and refer to recent frames only
+        if 1 <= pos <= len(frame_indices):
+            candidate_indices.append(frame_indices[pos - 1])
+    
+    # If no valid candidates found, select default frames
+    if not candidate_indices:
+        logging.info("No valid candidates found, using default selection")
+        num_candidates = min(3, len(frame_indices))
+        step = max(1, len(frame_indices) // num_candidates)
+        candidate_indices = frame_indices[::step][:num_candidates]
+    
+    # If no subtask found, use a generic one
+    if not subtask:
+        subtask = "continue task"
+    
+    return subtask, candidate_indices
 
 
 class HighLevelPolicy:
@@ -59,18 +132,9 @@ class HighLevelPolicy:
             self.model = Qwen3VLForConditionalGeneration.from_pretrained(
                 config.high_level_policy_name,
                 dtype="auto",
-                device_map="auto"
-            )
-            
-            # Optional: Enable flash_attention_2 for better acceleration and memory saving
-            # Especially useful in multi-image and video scenarios
-            # self.model = Qwen3VLForConditionalGeneration.from_pretrained(
-            #     config.high_level_policy_name,
-            #     dtype=torch.bfloat16,
-            #     attn_implementation="flash_attention_2",
-            #     device_map="auto",
-            # )
-            
+                device_map="auto",
+                attn_implementation="flash_attention_2"
+            )            
             self.processor = AutoProcessor.from_pretrained(config.high_level_policy_name)
             
             logging.info("HighLevelPolicy model loaded successfully")
@@ -210,8 +274,7 @@ IMPORTANT: Respond ONLY with the JSON object, no additional text.
         """
         Parse the VLM output to extract subtask and candidate frame indices.
         
-        The output is expected to be in JSON format:
-        {"current_subtask": "description", "keyframe_positions": [1, 3, 5]}
+        This is a wrapper around the parse_vlm_json_output function.
         
         Args:
             output: Raw text output from the VLM (JSON string)
@@ -222,75 +285,7 @@ IMPORTANT: Respond ONLY with the JSON object, no additional text.
             subtask: Extracted subtask description
             candidate_indices: List of selected frame indices
         """
-        subtask = ""
-        candidate_positions = []
-        
-        try:
-            # Try to parse as JSON
-            # First, clean the output - remove any markdown code blocks if present
-            cleaned_output = output.strip()
-            if cleaned_output.startswith("```"):
-                # Remove markdown code blocks
-                lines = cleaned_output.split("\n")
-                # Find the actual JSON content
-                json_lines = []
-                in_code_block = False
-                for line in lines:
-                    if line.strip().startswith("```"):
-                        in_code_block = not in_code_block
-                        continue
-                    if in_code_block or not line.strip().startswith("```"):
-                        json_lines.append(line)
-                cleaned_output = "\n".join(json_lines).strip()
-            
-            # Try to find JSON object in the output
-            # Look for the first { and last }
-            start_idx = cleaned_output.find("{")
-            end_idx = cleaned_output.rfind("}")
-            
-            if start_idx != -1 and end_idx != -1:
-                json_str = cleaned_output[start_idx:end_idx + 1]
-                parsed = json.loads(json_str)
-                
-                # Extract subtask
-                subtask = parsed.get("current_subtask", "")
-                
-                # Extract keyframe positions
-                candidate_positions = parsed.get("keyframe_positions", [])
-                
-                # Ensure positions are integers
-                candidate_positions = [int(pos) for pos in candidate_positions]
-                
-                logging.info(f"Successfully parsed JSON: subtask='{subtask}', positions={candidate_positions}")
-            else:
-                logging.warning("Could not find JSON object in output")
-                
-        except json.JSONDecodeError as e:
-            logging.warning(f"Could not parse JSON output: {e}")
-            logging.debug(f"Output was: {output}")
-        except Exception as e:
-            logging.warning(f"Error parsing model output: {e}")
-            logging.debug(f"Output was: {output}")
-        
-        # Convert 1-indexed positions to actual frame indices
-        candidate_indices = []
-        for pos in candidate_positions:
-            # Positions are 1-indexed and refer to recent frames only
-            if 1 <= pos <= len(frame_indices):
-                candidate_indices.append(frame_indices[pos - 1])
-        
-        # If no valid candidates found, select default frames
-        if not candidate_indices:
-            logging.info("No valid candidates found, using default selection")
-            num_candidates = min(3, len(frame_indices))
-            step = max(1, len(frame_indices) // num_candidates)
-            candidate_indices = frame_indices[::step][:num_candidates]
-        
-        # If no subtask found, use a generic one
-        if not subtask:
-            subtask = "continue task"
-        
-        return subtask, candidate_indices
+        return parse_vlm_json_output(output, frame_indices, num_keyframes)
 
     def _tensor_to_pil(self, tensor: torch.Tensor) -> Image.Image:
         """
