@@ -1,6 +1,5 @@
 import os
 
-# IMPORTANTE: Configurar CUDA_VISIBLE_DEVICES ANTES de importar torch/transformers
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
@@ -13,9 +12,6 @@ model = Qwen3VLForConditionalGeneration.from_pretrained(
     attn_implementation="flash_attention_2",
     low_cpu_mem_usage=True,
 )
-
-print(f"Modelo cargado en dispositivo: {model.device}")
-print(f"Device map: {model.hf_device_map}")
 
 processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-8B-Instruct")
 

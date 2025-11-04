@@ -531,15 +531,30 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             torch.set_float32_matmul_precision("high")
             self.sample_actions = torch.compile(self.sample_actions, mode=config.compile_mode)
 
-        msg = """An incorrect transformer version is used, please create an issue on https://github.com/huggingface/lerobot/issues"""
+        # Only check transformers version if NOT using high-level policy
+        # High-level policy (Qwen3-VL) requires standard transformers, while PI0.5 may need custom version
+        if not config.use_high_level_policy:
+            msg = """An incorrect transformer version is used, please create an issue on https://github.com/huggingface/lerobot/issues"""
 
-        try:
-            from transformers.models.siglip import check
+            try:
+                from transformers.models.siglip import check
 
-            if not check.check_whether_transformers_replace_is_installed_correctly():
-                raise ValueError(msg)
-        except ImportError:
-            raise ValueError(msg) from None
+                if not check.check_whether_transformers_replace_is_installed_correctly():
+                    raise ValueError(msg)
+            except ImportError:
+                raise ValueError(msg) from None
+        else:
+            # When using high-level policy, just log a warning if custom transformers not detected
+            try:
+                from transformers.models.siglip import check
+
+                if not check.check_whether_transformers_replace_is_installed_correctly():
+                    logging.warning(
+                        "Using standard transformers instead of custom version. "
+                        "This is expected when using high-level policy (Qwen3-VL)."
+                    )
+            except ImportError:
+                logging.info("Using standard transformers for high-level policy (Qwen3-VL).")
 
     def gradient_checkpointing_enable(self):
         """Enable gradient checkpointing for memory optimization."""

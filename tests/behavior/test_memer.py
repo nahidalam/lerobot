@@ -1,472 +1,302 @@
-#!/usr/bin/env python3
-
-"""
-Unified test script for BiMan models with synthetic data.
-This script can test any model by passing it as a parameter.
-It creates fake batches to test the model forward pass and action sampling.
-"""
-
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import argparse
-import torch
-import torch.nn.functional as F
-from typing import Dict, Any, Tuple
-
-from lerobot.utils.constants import OBS_STATE, ACTION, OBS_IMAGES
-from lerobot.configs.types import PolicyFeature, FeatureType
-from lerobot.policies.factory import get_policy_class, make_policy_config
 import logging
-from rich.logging import RichHandler
+import torch
+import numpy as np
+from lerobot.configs.types import FeatureType
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.utils import dataset_to_policy_features
+from lerobot.policies.memer.configuration_pi05 import PI05MemerConfig
+from lerobot.policies.memer.modeling_pi05 import PI05MemerPolicy
+from lerobot.policies.memer.processor_pi05 import make_pi05_memer_pre_post_processors
+from lerobot.policies.utils import prepare_observation_for_inference
+
 
 logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="[%H:%M:%S]",
-    handlers=[RichHandler(rich_tracebacks=True)]
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
-logger = logging.getLogger("awesome-logger")
-logger.setLevel(logging.DEBUG)
-
-# Model configurations mapping
-MODEL_CONFIGS = {
-    "pi0": {
-        "state_dim": 14,
-        "action_dim": 14,
-        "img_height": 224,
-        "img_width": 224,
-        "cameras": ["top"],  # Single camera
-        "n_obs_steps": 1,
-        "chunk_size": 50,
-    },
-    "groot": {
-        "state_dim": 14,
-        "action_dim": 14,
-        "img_height": 224,
-        "img_width": 224,
-        "cameras": ["top"],  # Single camera
-        "n_obs_steps": 1,
-        "chunk_size": 50,
-    },
-    "act": {
-        "state_dim": 8,
-        "action_dim": 8,
-        "img_height": 480,
-        "img_width": 640,
-        "cameras": ["front", "wrist"],
-        "n_obs_steps": 1,
-        "chunk_size": 100,
-    },
-    "diffusion": {
-        "state_dim": 8,
-        "action_dim": 8,
-        "img_height": 480,
-        "img_width": 640,
-        "cameras": ["front", "wrist"],
-        "n_obs_steps": 2,
-        "chunk_size": 16,
-    },
-}
+logger = logging.getLogger(__name__)
 
 
-def create_synthetic_batch(
-    model_name: str,
-    batch_size: int = 2,
-    chunk_size: int = 50,
-    device: str = "cpu"
-) -> Dict[str, torch.Tensor]:
-    """
-    Create a synthetic batch that matches the expected model input format.
+def print_batch(batch: dict):
+    for key, value in batch.items():
+        if isinstance(value, torch.Tensor):
+            details = f"{key}: {tuple(value.shape)} | {value.dtype}"
+            if value.is_cuda:
+                details += " | cuda"
+            if key.endswith("attention_mask"):
+                details += f" | sum={value.sum().item()}"
+            if "images" in key:
+                details += f" | min={value.min().item():.3f} max={value.max().item():.3f}"
+            print(details)
+        elif isinstance(value, (list, tuple)):
+            print(f"{key}: list(len={len(value)})")
+        else: 
+            print(f"{key}: {value}")
+
+def simulate_environment_inference(
+    dataset: LeRobotDataset,
+    policy: PI05MemerPolicy,
+    preprocessor,
+    general_task: str,
+    num_steps: int = 100,
+    start_episode: int = 0
+):
+    policy.reset()
+    preprocessor.reset()
     
-    Args:
-        model_name: Name of the model to create batch for
-        batch_size: Number of samples in the batch
-        chunk_size: Number of action steps (sequence length)
-        device: Device to create tensors on
+    # Get episode boundaries from metadata
+    start_idx = dataset.meta.episodes[start_episode]["dataset_from_index"]
+    end_idx = dataset.meta.episodes[start_episode]["dataset_to_index"]
+    available_steps = end_idx - start_idx
+    num_steps = min(num_steps, available_steps)
     
-    Returns:
-        Dictionary containing synthetic batch data
-    """
-    if model_name not in MODEL_CONFIGS:
-        raise ValueError(f"Model '{model_name}' not supported. Available models: {list(MODEL_CONFIGS.keys())}")
+    logger.info(f"Starting simulation: {num_steps} steps from episode {start_episode}")
     
-    config = MODEL_CONFIGS[model_name]
-    state_dim = config["state_dim"]
-    action_dim = config["action_dim"]
-    img_height = config["img_height"]
-    img_width = config["img_width"]
-    cameras = config["cameras"]
-    n_obs_steps = config["n_obs_steps"]
-    
-    batch = {}
-    
-    # Basic metadata
-    batch["episode_index"] = torch.randint(0, 100, (batch_size,), device=device)
-    batch["frame_index"] = torch.randint(0, 1000, (batch_size,), device=device)
-    batch["timestamp"] = torch.rand(batch_size, device=device) * 10.0
-    batch["task_index"] = torch.randint(0, 10, (batch_size,), device=device)
-    
-    # Language tasks - using sample robot manipulation tasks
-    sample_tasks = [
-        "pick up the red cube",
-        "place the object in the box",
-        "grasp the blue cylinder",
-        "move the cup to the right",
-        "stack the blocks"
-    ]
-    batch["task"] = [sample_tasks[i % len(sample_tasks)] for i in range(batch_size)]
-    
-    # Create observations based on n_obs_steps
-    if n_obs_steps > 1:
-        # Multiple observation steps: (batch_size, n_obs_steps, state_dim)
-        batch[OBS_STATE] = torch.randn(batch_size, n_obs_steps, state_dim, device=device) * 0.1
+    for step in range(num_steps):
+        frame_idx = start_idx + step
+        # Get frame from dataset
+        frame = dataset[frame_idx]
         
-        # Camera images: (batch_size, n_obs_steps, 3, height, width) 
-        for camera in cameras:
-            batch[f"{OBS_IMAGES}.{camera}"] = torch.rand(batch_size, n_obs_steps, 3, img_height, img_width, device=device)
-    else:
-        # Single observation step: (batch_size, state_dim)
-        batch[OBS_STATE] = torch.randn(batch_size, state_dim, device=device) * 0.1
-        
-        # Camera images: (batch_size, 3, height, width)
-        for camera in cameras:
-            batch[f"{OBS_IMAGES}.{camera}"] = torch.rand(batch_size, 3, img_height, img_width, device=device)
-    
-    # Actions: (batch_size, chunk_size, action_dim)
-    batch[ACTION] = torch.randn(batch_size, chunk_size, action_dim, device=device) * 0.1
-    
-    # Optional padding masks for actions (useful for variable length sequences)
-    # True means the token is valid, False means it's padding
-    batch["action_is_pad"] = torch.zeros(batch_size, chunk_size, dtype=torch.bool, device=device)
-    # Let's add some padding to the last few steps for realism
-    for i in range(batch_size):
-        # Randomly make last 5-10 steps padding
-        num_padding = torch.randint(5, 11, (1,)).item()
-        batch["action_is_pad"][i, -num_padding:] = True
-    
-    return batch
+        # Prepare observation in the same way as the real inference pipeline.
+        observation_np = {}
+        for key, value in frame.items():
+            if not key.startswith("observation."):
+                continue
 
+            if "_is_pad" in key:
+                continue
 
-def create_dataset_stats(model_name: str, device: str = "cpu") -> Dict[str, Dict[str, torch.Tensor]]:
-    """
-    Create fake dataset statistics for normalization.
-    
-    Args:
-        model_name: Name of the model
-        device: Device to create tensors on
-    
-    Returns:
-        Dictionary containing mean, std, min, max statistics
-    """
-    if model_name not in MODEL_CONFIGS:
-        raise ValueError(f"Model '{model_name}' not supported. Available models: {list(MODEL_CONFIGS.keys())}")
-    
-    config = MODEL_CONFIGS[model_name]
-    state_dim = config["state_dim"]
-    action_dim = config["action_dim"]
-    cameras = config["cameras"]
-    
-    stats = {
-        OBS_STATE: {
-            "mean": torch.zeros(state_dim, device=device),
-            "std": torch.ones(state_dim, device=device),
-            "min": torch.ones(state_dim, device=device) * -1.0,
-            "max": torch.ones(state_dim, device=device) * 1.0
-        },
-        ACTION: {
-            "mean": torch.zeros(action_dim, device=device), 
-            "std": torch.ones(action_dim, device=device),
-            "min": torch.ones(action_dim, device=device) * -1.0,
-            "max": torch.ones(action_dim, device=device) * 1.0
-        }
-    }
-    
-    # Add image statistics for each camera
-    for camera in cameras:
-        # For images, we use per-channel statistics (3 channels for RGB)
-        stats[f"{OBS_IMAGES}.{camera}"] = {
-            "mean": torch.zeros(3, device=device),
-            "std": torch.ones(3, device=device),
-            "min": torch.ones(3, device=device) * -1.0,
-            "max": torch.ones(3, device=device) * 1.0
-        }
-    
-    return stats
+            if not isinstance(value, torch.Tensor):
+                observation_np[key] = np.asarray(value)
+                continue
 
+            tensor = value.detach().cpu()
 
-def setup_config_features(config, model_name: str):
-    """Set up input and output features for the configuration."""
-    
-    if model_name not in MODEL_CONFIGS:
-        raise ValueError(f"Model '{model_name}' not supported. Available models: {list(MODEL_CONFIGS.keys())}")
-    
-    model_config = MODEL_CONFIGS[model_name]
-    state_dim = model_config["state_dim"]
-    action_dim = model_config["action_dim"]
-    img_height = model_config["img_height"]
-    img_width = model_config["img_width"]
-    cameras = model_config["cameras"]
-    
-    # Set up input features
-    input_features = {
-        OBS_STATE: PolicyFeature(
-            type=FeatureType.STATE,
-            shape=(state_dim,)
-        )
-    }
-    
-    # Add camera features
-    for camera in cameras:
-        input_features[f"{OBS_IMAGES}.{camera}"] = PolicyFeature(
-            type=FeatureType.VISUAL,
-            shape=(3, img_height, img_width)
-        )
-    
-    config.input_features = input_features
-    
-    # Set up output features
-    config.output_features = {
-        ACTION: PolicyFeature(
-            type=FeatureType.ACTION,
-            shape=(action_dim,)
-        )
-    }
-    
-    # Adjust config dimensions
-    config.max_state_dim = max(getattr(config, 'max_state_dim', 0), state_dim)
-    config.max_action_dim = max(getattr(config, 'max_action_dim', 0), action_dim)
-
-
-def test_model_forward(model_name: str, batch_size: int = 2, device: str = None):
-    """Test the model forward pass with synthetic data."""
-    
-    logger.info(f"🤖 Testing {model_name} model...")
-    
-    # Set device
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(f"Using device: {device}")
-    
-    # Create configuration
-    config = make_policy_config(model_name)
-    
-    # Set logging if available
-    if hasattr(config, 'use_logger'):
-        config.use_logger = True
-    
-    # Get model configuration
-    model_config = MODEL_CONFIGS[model_name]
-    
-    # Set up features properly
-    setup_config_features(config, model_name)
-    
-    logger.info(f"📝 Configuration:")
-    logger.info(f"  - Model: {model_name}")
-    logger.info(f"  - Chunk size: {getattr(config, 'chunk_size', 'N/A')}")
-    logger.info(f"  - Max state dim: {config.max_state_dim}")
-    logger.info(f"  - Max action dim: {config.max_action_dim}")
-    logger.info(f"  - Image resize: {getattr(config, 'resize_imgs_with_padding', 'N/A')}")
-    logger.info(f"  - Input features: {list(config.input_features.keys())}")
-    logger.info(f"  - Output features: {list(config.output_features.keys())}")
-    if hasattr(config, 'image_features'):
-        logger.info(f"  - Image features: {list(config.image_features.keys())}")
-    
-    # Create synthetic dataset stats
-    dataset_stats = create_dataset_stats(model_name, device)
-    logger.info(f"📊 Created synthetic dataset stats")
-    
-    # Create model
-    logger.info(f"🏗️  Creating {model_name} model...")
-    try:
-        policy_cls = get_policy_class(model_name)
-        # New API: only pass config, not dataset_stats
-        policy = policy_cls(config=config)
-        policy = policy.to(device)
-        policy.eval()  # Set to evaluation mode
-        logger.info(f"✅ Model created successfully!")
-        
-        # Print model info
-        total_params = sum(p.numel() for p in policy.parameters())
-        trainable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
-        logger.info(f"📈 Model parameters:")
-        logger.info(f"  - Total: {total_params:,}")
-        logger.info(f"  - Trainable: {trainable_params:,}")
-        
-    except Exception as e:
-        logger.info(f"❌ Error creating model: {e}")
-        raise
-    
-    # Create synthetic batch
-    logger.info(f"\n🎲 Creating synthetic batch (batch_size={batch_size})...")
-    
-    try:
-        # Get chunk_size from config or model config
-        chunk_size = model_config.get("chunk_size", getattr(config, 'chunk_size', 50))
-            
-        batch = create_synthetic_batch(
-            model_name=model_name,
-            batch_size=batch_size,
-            chunk_size=chunk_size,
-            device=device
-        )
-        
-        logger.info(f"📦 Batch created with keys: {list(batch.keys())}")
-        for key, value in batch.items():
-            if isinstance(value, torch.Tensor):
-                logger.info(f"  - {key}: {value.shape} {value.dtype}")
+            if key.startswith("observation.images"):
+                arr = tensor.numpy()
+                if arr.ndim == 4:
+                    arr = arr.squeeze(0)
+                if arr.ndim == 3 and arr.shape[0] in (1, 3):
+                    arr = np.transpose(arr, (1, 2, 0))
+                # Convert to uint8 in [0, 255] as expected by prepare_observation_for_inference
+                if arr.max() <= 1.0:
+                    arr = (arr * 255.0).clip(0, 255)
+                arr = arr.astype(np.uint8)
             else:
-                logger.info(f"  - {key}: {type(value)} (length: {len(value) if hasattr(value, '__len__') else 'N/A'})")
-                
-    except Exception as e:
-        logger.info(f"❌ Error creating batch: {e}")
-        raise
+                arr = tensor.numpy().astype(np.float32)
+
+            observation_np[key] = arr
+
+        device = torch.device(policy.config.device)
+        observation_for_policy = prepare_observation_for_inference(
+            observation_np,
+            device=device,
+            task=general_task,
+            robot_type=None,
+        )
+
+        # Apply preprocessor to tokenize/normalize inputs. This mirrors lerobot_record.
+        processed_batch = preprocessor(observation_for_policy)
+        
+        print_batch(processed_batch)
+        
+        is_query_step = (step > 0) and (step % policy.config.high_level_query_interval == 0)
+        if is_query_step:
+            logger.info(f"\n--- Step {step}/{num_steps} (Frame {frame_idx}) ---")
+            logger.info(f"🔍 HIGH-LEVEL QUERY STEP")
+        
+        with torch.no_grad():
+            action = policy.select_action(processed_batch)
+        
+        if policy.high_level_policy is not None and is_query_step:
+            logger.info(f"Memory:")
+            logger.info(f"  Recent frames: {len(policy._recent_frames)}/{policy.config.recent_frames_window}")
+            logger.info(f"  Keyframes: {len(policy._keyframes)}/{policy.config.max_keyframes}")
+            if len(policy._keyframes) > 0:
+                keyframe_indices = [kf[0] for kf in policy._keyframes]
+                logger.info(f"  Keyframe indices: {keyframe_indices}")
+            if policy._current_subtask is not None:
+                logger.info(f"  Current subtask: '{policy._current_subtask}'")
+            else:
+                logger.info(f"  Current subtask: None (using general task)")
     
-    # Test forward pass (training mode)
-    logger.info(f"\n🔄 Testing training forward pass...")
-    try:
-        policy.train()
-        
-        with torch.no_grad():  # We don't need gradients for testing
-            loss, loss_dict = policy.forward(batch)
-            
-        logger.info(f"✅ Training forward pass successful!")
-        logger.info(f"📉 Loss: {loss:.6f}")
-        if loss_dict is not None:
-            logger.info(f"📊 Loss dict keys: {list(loss_dict.keys())}")
-            for key, value in loss_dict.items():
-                if isinstance(value, torch.Tensor):
-                    logger.info(f"  - {key}: {value.shape if hasattr(value, 'shape') else value}")
-                else:
-                    logger.info(f"  - {key}: {value}")
-        else:
-            logger.info(f"📊 Loss dict: None (model returned no additional loss information)")
-                
-    except Exception as e:
-        logger.info(f"❌ Error in training forward pass: {e}")
-        raise
+    if policy.high_level_policy is not None:
+        logger.info("\n" + "="*80)
+        logger.info("FINAL STATISTICS")
+        logger.info("="*80)
+        logger.info(f"Total high-level queries: {len(policy._candidate_frame_lists)}")
+        logger.info(f"Final keyframes: {len(policy._keyframes)}")
+        if len(policy._keyframes) > 0:
+            keyframe_indices = [kf[0] for kf in policy._keyframes]
+            logger.info(f"Keyframe indices: {keyframe_indices}")
+        logger.info(f"Final subtask: '{policy._current_subtask}'")
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Test MEMER high-level policy inference by simulating environment interaction with dataset frames."
+    )
     
-    # Test inference (action selection)
-    logger.info(f"\n🎯 Testing inference (action selection)...")
-    try:
-        policy.eval()
-        policy.reset()  # Reset internal queues
-        
-        # Get n_obs_steps from model config
-        n_obs_steps = model_config.get("n_obs_steps", 1)
-        cameras = model_config["cameras"]
-        
-        if n_obs_steps > 1:
-            # For models with multiple observation steps, simulate queue-based inference
-            # by sending observations one by one
-            for obs_step in range(n_obs_steps):
-                # Create single timestep observation (no temporal dimension)
-                step_batch = {}
-                step_batch[OBS_STATE] = batch[OBS_STATE][:1, obs_step]  # (1, state_dim)
-                for camera in cameras:
-                    step_batch[f"{OBS_IMAGES}.{camera}"] = batch[f"{OBS_IMAGES}.{camera}"][:1, obs_step]  # (1, 3, H, W)
-                step_batch["task"] = [batch["task"][0]]
-                
-                with torch.no_grad():
-                    action = policy.select_action(step_batch)
-        else:
-            # For single observation models, use simpler approach
-            inference_batch = {}
-            for key, value in batch.items():
-                if isinstance(value, torch.Tensor) and key not in [ACTION, "action_is_pad"]:
-                    inference_batch[key] = value[:1]  # First sample only
-                elif key == "task":
-                    inference_batch[key] = [value[0]]  # First task only
-            
-            with torch.no_grad():
-                action = policy.select_action(inference_batch)
-            
-        logger.info(f"✅ Inference successful!")
-        logger.info(f"🎯 Generated action shape: {action.shape}")
-        logger.info(f"🎯 Action values (first 5): {action.flatten()[:5]}")
-        
-    except Exception as e:
-        logger.info(f"❌ Error in inference: {e}")
-        raise
+    # Dataset and task configuration
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="NONHUMAN-RESEARCH/SARM-DATASET-TEST",
+        help="HuggingFace dataset repository ID (default: NONHUMAN-RESEARCH/SARM-DATASET-TEST)"
+    )
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="Complete the task shown in the demonstration",
+        help="General task description for the episode"
+    )
     
-    logger.info(f"\n🎉 All tests passed! {model_name} model is working correctly.")
-    return True
+    # Simulation parameters
+    parser.add_argument(
+        "--num-steps",
+        type=int,
+        default=50,
+        help="Number of steps to simulate (default: 50)"
+    )
+    parser.add_argument(
+        "--episode",
+        type=int,
+        default=0,
+        help="Which episode to start from in the dataset (default: 0)"
+    )
+    
+    # High-level policy settings
+    parser.add_argument(
+        "--high-level-policy",
+        dest="use_high_level_policy",
+        action="store_true",
+        default=True,
+        help="Enable high-level policy for MEMER (default: disabled)"
+    )
+    parser.add_argument(
+        "--no-high-level-policy",
+        dest="use_high_level_policy",
+        action="store_false",
+        help="Disable high-level policy (test without MEMER)"
+    )
+    parser.add_argument(
+        "--query-interval",
+        type=int,
+        default=5,
+        help="Query high-level policy every N steps (default: 5)"
+    )
+    parser.add_argument(
+        "--recent-frames-window",
+        type=int,
+        default=10,
+        help="Number of recent frames to keep (default: 10)"
+    )
+    parser.add_argument(
+        "--max-keyframes",
+        type=int,
+        default=8,
+        help="Maximum number of keyframes to maintain (default: 8)"
+    )
+    parser.add_argument(
+        "--keyframe-distance-threshold",
+        type=int,
+        default=10,
+        help="Distance threshold for keyframe clustering (default: 10)"
+    )
+    
+    # Camera settings for high-level policy
+    parser.add_argument(
+        "--camera-key",
+        type=str,
+        default="observation.images.camera_0",
+        help="Camera key for high-level policy (default: observation.images.camera_0)"
+    )
+    
+    return parser.parse_args()
 
 
 def main():
-    """Main function with argument parsing."""
-    parser = argparse.ArgumentParser(
-        description="Unified test script for BiMan models",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"""
-Available models: {', '.join(MODEL_CONFIGS.keys())}
-
-Examples:
-  python test_model.py --model pi0
-  python test_model.py --model smolvla --batch-size 4
-  python test_model.py --model zero_ki_realtime --device cuda
-        """
+    """Main test function."""
+    
+    # Parse command line arguments
+    args = parse_args()
+    
+    # Configuration from arguments
+    dataset_repo_id = args.dataset
+    general_task = args.task
+    num_simulation_steps = args.num_steps
+    start_episode = args.episode
+    
+    # High-level policy settings
+    use_high_level_policy = args.use_high_level_policy
+    high_level_query_interval = args.query_interval
+    
+    logger.info(f"Dataset: {dataset_repo_id}")
+    logger.info(f"Task: {general_task}")
+    logger.info(f"Steps: {num_simulation_steps}")
+    logger.info(f"Episode: {start_episode}")
+    logger.info(f"High-level policy: {'Enabled' if use_high_level_policy else 'Disabled'}")
+    if use_high_level_policy:
+        logger.info(f"  Camera key: {args.camera_key}")
+        logger.info(f"  Query interval: {high_level_query_interval}")
+        logger.info(f"  Recent frames window: {args.recent_frames_window}")
+        logger.info(f"  Max keyframes: {args.max_keyframes}")
+        logger.info(f"  Distance threshold: {args.keyframe_distance_threshold}")
+    logger.info("="*80 + "\n")
+    
+    dataset = LeRobotDataset(repo_id=dataset_repo_id)
+    logger.info(f"Dataset loaded: {dataset.repo_id} ({dataset.num_episodes} episodes, {len(dataset)} frames)")
+    
+    # Extract features from dataset
+    features = dataset_to_policy_features(dataset.meta.features)
+    output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
+    input_features = {key: ft for key, ft in features.items() if key not in output_features}
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    policy_config = PI05MemerConfig(
+        use_high_level_policy=use_high_level_policy,
+        high_level_query_interval=high_level_query_interval,
+        recent_frames_window=args.recent_frames_window,
+        max_keyframes=args.max_keyframes,
+        keyframe_distance_threshold=args.keyframe_distance_threshold,
+        high_level_policy_name="Qwen/Qwen3-VL-8B-Instruct",
+        camera_key_high_level_policy=args.camera_key,
+        paligemma_variant="gemma_2b",
+        action_expert_variant="gemma_300m",
+        dtype="float32",
+        chunk_size=50,
+        n_action_steps=50,
+        device=device,
+        input_features=input_features,
+        output_features=output_features,
     )
     
-    parser.add_argument(
-        "--model", 
-        type=str, 
-        required=False,
-        choices=list(MODEL_CONFIGS.keys()),
-        help="Model to test"
+    policy = PI05MemerPolicy(config=policy_config)
+    policy.eval()
+    
+    # Create preprocessor and postprocessor (needed to tokenize language input)
+    preprocessor, postprocessor = make_pi05_memer_pre_post_processors(
+        config=policy_config,
+        dataset_stats=dataset.meta.stats,
     )
     
-    parser.add_argument(
-        "--batch-size", 
-        type=int, 
-        default=2,
-        help="Batch size for testing (default: 2)"
+    logger.info("\n" + "="*80)
+    logger.info("RUNNING INFERENCE SIMULATION")
+    logger.info("="*80 + "\n")
+    
+    simulate_environment_inference(
+        dataset=dataset,
+        policy=policy,
+        preprocessor=preprocessor,
+        general_task=general_task,
+        num_steps=num_simulation_steps,
+        start_episode=start_episode,
     )
-    
-    parser.add_argument(
-        "--device", 
-        type=str, 
-        default=None,
-        choices=["cpu", "cuda", "mps"],
-        help="Device to run on (default: auto-detect)"
-    )
-    
-    parser.add_argument(
-        "--list-models", 
-        action="store_true",
-        help="List all available models and exit"
-    )
-    
-    args = parser.parse_args()
-    
-    if args.list_models:
-        print("Available models:")
-        for model, config in MODEL_CONFIGS.items():
-            cameras_str = ", ".join(config["cameras"])
-            print(f"  - {model}: {config['state_dim']}D state, {config['action_dim']}D action, "
-                  f"{config['img_height']}x{config['img_width']} images, cameras: {cameras_str}, "
-                  f"n_obs_steps: {config['n_obs_steps']}, chunk_size: {config['chunk_size']}")
-        return
-    
-    if not args.model:
-        parser.error("--model is required unless using --list-models")
-    
-    logger.info("🚀 Starting unified model test...")
-    logger.info(f"Model: {args.model}")
-    logger.info(f"Batch size: {args.batch_size}")
-    logger.info(f"Device: {args.device or 'auto-detect'}")
-    
-    try:
-        test_model_forward(
-            model_name=args.model,
-            batch_size=args.batch_size,
-            device=args.device
-        )
-        logger.info(f"\n🎊 Test completed successfully!")
-        
-    except Exception as e:
-        logger.info(f"\n💥 Test failed with error: {e}")
-        import traceback
-        traceback.print_exc()
-        exit(1)
 
 
 if __name__ == "__main__":
