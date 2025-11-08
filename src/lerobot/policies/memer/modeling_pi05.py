@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import re
 import builtins
 import logging
 import math
@@ -1069,6 +1069,11 @@ class PI05MemerPolicy(PreTrainedPolicy):
             # Candidate frame lists J_{0:t} (stores lists of frame indices from each high-level query)
             self._candidate_frame_lists = []
             
+            # Candidate frames cache: stores ALL candidate frames ever selected
+            # This is crucial because build_visual_memory may select keyframes from old candidates
+            # that are no longer in the recent_frames window
+            self._candidate_frames_cache = {}  # Dict mapping frame_index -> frame_tensor
+            
             # Current subtask l'_t
             self._current_subtask = None
             
@@ -1163,14 +1168,30 @@ class PI05MemerPolicy(PreTrainedPolicy):
             general_task: High-level task description
         """
         # Get the first camera image as the representative frame for this timestep
+
         first_camera_key = self.config.camera_key_high_level_policy
+        if first_camera_key not in batch:
+            # Only log warning once to avoid spam
+            if self._global_frame_index == 0:
+                available_cameras = [k for k in batch.keys() if k.startswith("observation.images.")]
+                logging.warning(
+                    f"Camera key '{first_camera_key}' not found in batch. "
+                    f"Available cameras: {available_cameras}. "
+                    f"High-level policy memory will not be updated. "
+                    f"Set --camera-key to one of the available cameras."
+                )
+            return
+        
         if first_camera_key in batch:
             # Get first image from batch (batch_size=1 during inference)
             frame = batch[first_camera_key][0]  # Shape: (C, H, W)
             
-            # Add to recent frames with global index
-            self._recent_frames.append(frame.clone())
-            self._recent_frame_indices.append(self._global_frame_index)
+            # Add to recent frames with global index (respecting sampling interval)
+            # Only add every Nth frame to recent_frames where N = recent_frames_sampling_interval
+            if self._global_frame_index % self.config.recent_frames_sampling_interval == 0:
+                self._recent_frames.append(frame.clone())
+                self._recent_frame_indices.append(self._global_frame_index)
+                logging.info(f"[DEBUG] Added frame {self._global_frame_index} to recent_frames")
             
             # Increment step counter and global frame index
             self._step_counter += 1
@@ -1182,12 +1203,23 @@ class PI05MemerPolicy(PreTrainedPolicy):
                 recent_frames_list = list(self._recent_frames)
                 frame_indices_list = list(self._recent_frame_indices)
                 
+                logging.info(f"[DEBUG] Preparing high-level query:")
+                logging.info(f"[DEBUG]   Recent frames: {len(recent_frames_list)}")
+                logging.info(f"[DEBUG]   Frame indices: {frame_indices_list}")
+                logging.info(f"[DEBUG]   Current global frame index: {self._global_frame_index}")
+                
                 # Get keyframe tensors (up to max_keyframes most recent)
                 keyframe_tensors = [kf[1] for kf in self._keyframes[-self.config.max_keyframes:]]
                 
                 # Query high-level policy
+                parser_general_task = ""
+                match = re.search(r"Task:(.*),\s*State:", general_task)
+                if match:
+                    parser_general_task = match.group(1).strip()
+                logging.info(f"Querying high-level policy with general task: {parser_general_task}")
+
                 subtask, candidate_indices = self.high_level_policy.generate_subtasks_and_key_frames(
-                    general_task=general_task,
+                    general_task=parser_general_task,
                     recent_frames=recent_frames_list,
                     keyframes=keyframe_tensors,
                     frame_indices=frame_indices_list,
@@ -1198,8 +1230,23 @@ class PI05MemerPolicy(PreTrainedPolicy):
                 logging.info(f"High-level policy generated subtask: {subtask}")
                 logging.info(f"Selected candidate frames: {candidate_indices}")
                 
+                # IMPORTANT: Cache the actual frames for all candidate indices
+                # This ensures we can retrieve them later even if they leave recent_frames window
+                for cand_idx in candidate_indices:
+                    # Find the frame in recent_frames
+                    for i, frame_idx in enumerate(self._recent_frame_indices):
+                        if frame_idx == cand_idx:
+                            # Store in cache if not already there
+                            if cand_idx not in self._candidate_frames_cache:
+                                self._candidate_frames_cache[cand_idx] = self._recent_frames[i].clone()
+                                logging.info(f"[DEBUG] Cached candidate frame {cand_idx}")
+                            break
+                
                 # Add candidate indices to the list
                 self._candidate_frame_lists.append(candidate_indices)
+                logging.info(f"[DEBUG] Added candidate_indices to list. Total lists: {len(self._candidate_frame_lists)}")
+                logging.info(f"[DEBUG] All candidate_frame_lists: {self._candidate_frame_lists}")
+                logging.info(f"[DEBUG] Candidate frames cache size: {len(self._candidate_frames_cache)}")
                 
                 # Rebuild visual memory K_t using build_visual_memory algorithm
                 keyframe_indices = build_visual_memory(
@@ -1207,24 +1254,42 @@ class PI05MemerPolicy(PreTrainedPolicy):
                     distance_threshold=self.config.keyframe_distance_threshold
                 )
                 
+                logging.info(f"[DEBUG] keyframe_indices returned from build_visual_memory: {keyframe_indices}")
+                logging.info(f"[DEBUG] Current recent_frame_indices: {list(self._recent_frame_indices)}")
+                logging.info(f"[DEBUG] Current keyframes: {[kf[0] for kf in self._keyframes]}")
+                
                 # Update keyframes: keep frames that are in keyframe_indices
-                # For frames we don't have, we need to retrieve them from recent frames or keep old ones
+                # Search order: candidate_cache -> recent_frames -> existing_keyframes
                 new_keyframes = []
                 for kf_idx in keyframe_indices[-self.config.max_keyframes:]:  # Keep most recent
-                    # Try to find frame in recent frames
                     found = False
-                    for i, frame_idx in enumerate(self._recent_frame_indices):
-                        if frame_idx == kf_idx:
-                            new_keyframes.append((kf_idx, self._recent_frames[i].clone()))
-                            found = True
-                            break
                     
-                    # If not in recent frames, check if it's in existing keyframes
+                    # 1. First, try candidate frames cache (this is the key fix!)
+                    if kf_idx in self._candidate_frames_cache:
+                        new_keyframes.append((kf_idx, self._candidate_frames_cache[kf_idx].clone()))
+                        found = True
+                        logging.info(f"[DEBUG] Found keyframe {kf_idx} in candidate cache ✓")
+                    
+                    # 2. Then try recent frames
+                    elif not found:
+                        for i, frame_idx in enumerate(self._recent_frame_indices):
+                            if frame_idx == kf_idx:
+                                new_keyframes.append((kf_idx, self._recent_frames[i].clone()))
+                                found = True
+                                logging.info(f"[DEBUG] Found keyframe {kf_idx} in recent frames at position {i}")
+                                break
+                    
+                    # 3. Finally, check existing keyframes
                     if not found:
                         for old_idx, old_frame in self._keyframes:
                             if old_idx == kf_idx:
                                 new_keyframes.append((old_idx, old_frame))
+                                found = True
+                                logging.info(f"[DEBUG] Found keyframe {kf_idx} in existing keyframes")
                                 break
+                    
+                    if not found:
+                        logging.warning(f"[DEBUG] Keyframe {kf_idx} NOT FOUND in any storage! This should not happen.")
                 
                 self._keyframes = new_keyframes
                 logging.info(f"Updated keyframes to {len(self._keyframes)} frames at indices: {[kf[0] for kf in self._keyframes]}")

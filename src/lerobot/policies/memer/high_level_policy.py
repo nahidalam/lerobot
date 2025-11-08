@@ -102,6 +102,9 @@ class HighLevelPolicy:
     """
     High-level policy for MEMER that generates subtasks and selects candidate keyframes.
     
+    Supports both Qwen2.5-VL and Qwen3-VL models. The model type is automatically detected
+    based on the model name.
+    
     The high-level policy π_h(l'_t, J_t | R_t, K_t, l_t) takes:
     - R_t: Recent frames (last N frames)
     - K_t: Current keyframes (up to 8)
@@ -110,11 +113,16 @@ class HighLevelPolicy:
     And outputs:
     - l'_t: Subtask description
     - J_t: Candidate frames (subset of recent frames)
+    
+    Supported models:
+    - Qwen/Qwen2.5-VL-7B-Instruct
+    - Qwen/Qwen3-VL-8B-Instruct
+    - Any other Qwen VL model variant
     """
 
     def __init__(self, config: PI05MemerConfig):
         """
-        Initialize the high-level policy with Qwen3-VL model.
+        Initialize the high-level policy with Qwen VLM (supports Qwen2.5-VL and Qwen3-VL).
         
         Args:
             config: Configuration object containing model settings
@@ -124,24 +132,44 @@ class HighLevelPolicy:
         
         logging.info(f"Initializing HighLevelPolicy with model: {config.high_level_policy_name}")
         
+        # Detect model type based on name
+        model_name_lower = config.high_level_policy_name.lower()
+        self.is_qwen25 = "qwen2.5" in model_name_lower or "qwen2_5" in model_name_lower
+        
         try:
-            from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+            from transformers import AutoProcessor
             
-            # Load the VLM model for high-level planning
-            # Using torch.bfloat16 for better performance (recommended by Qwen3-VL)
-            self.model = Qwen3VLForConditionalGeneration.from_pretrained(
-                config.high_level_policy_name,
-                dtype="auto",
-                device_map="auto",
-                attn_implementation="flash_attention_2"
-            )            
+            if self.is_qwen25:
+                # Qwen2.5-VL
+                from transformers import Qwen2_5_VLForConditionalGeneration
+                logging.info("Detected Qwen2.5-VL model")
+                
+                self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    config.high_level_policy_name,
+                    torch_dtype="auto",
+                    device_map="auto",
+                    attn_implementation="flash_attention_2"
+                )
+            else:
+                # Qwen3-VL
+                from transformers import Qwen3VLForConditionalGeneration
+                logging.info("Detected Qwen3-VL model")
+                
+                self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+                    config.high_level_policy_name,
+                    dtype="auto",
+                    device_map="auto",
+                    attn_implementation="flash_attention_2"
+                )
+            
             self.processor = AutoProcessor.from_pretrained(config.high_level_policy_name)
             
             logging.info("HighLevelPolicy model loaded successfully")
         except Exception as e:
-            logging.warning(f"Could not load Qwen3-VL model: {e}. Using dummy implementation.")
+            logging.warning(f"Could not load Qwen VLM model: {e}. Using dummy implementation.")
             self.model = None
             self.processor = None
+            self.is_qwen25 = False
 
     def generate_subtasks_and_key_frames(
         self,
@@ -173,38 +201,46 @@ class HighLevelPolicy:
             candidate_indices = frame_indices[::step][:num_candidates]
             return subtask, candidate_indices
         
-        # Prepare the prompt for the VLM
-        prompt = self._create_prompt(general_task, len(recent_frames), len(keyframes))
+        # Prepare PIL images from tensors
+        keyframe_pil_images = [self._tensor_to_pil(kf) for kf in keyframes]
+        recent_pil_images = [self._tensor_to_pil(rf) for rf in recent_frames]
         
-        # Prepare images for the model
-        images = []
-        
-        # Add keyframes first
-        for kf in keyframes:
-            images.append(self._tensor_to_pil(kf))
-        
-        # Add recent frames
-        for rf in recent_frames:
-            images.append(self._tensor_to_pil(rf))
-        
-        # Create messages for the model
-        content = []
-        for img in images:
-            content.append({"type": "image", "image": img})
-        content.append({"type": "text", "text": prompt})
-        
-        messages = [{"role": "user", "content": content}]
+        # Create messages for the model with system and user roles
+        messages = self._create_messages(
+            general_task, 
+            keyframe_pil_images, 
+            recent_pil_images,
+            len(recent_frames)
+        )
         
         # Generate response
         try:
-            inputs = self.processor.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_dict=True,
-                return_tensors="pt"
-            )
-            inputs = inputs.to(self.device)
+            if self.is_qwen25:
+                # Qwen2.5-VL processing
+                from qwen_vl_utils import process_vision_info
+                
+                text = self.processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                image_inputs, video_inputs = process_vision_info(messages)
+                inputs = self.processor(
+                    text=[text],
+                    images=image_inputs,
+                    videos=video_inputs,
+                    padding=True,
+                    return_tensors="pt",
+                )
+                inputs = inputs.to(self.device)
+            else:
+                # Qwen3-VL processing
+                inputs = self.processor.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_dict=True,
+                    return_tensors="pt"
+                )
+                inputs = inputs.to(self.device)
             
             with torch.no_grad():
                 generated_ids = self.model.generate(**inputs, max_new_tokens=256)
@@ -227,6 +263,7 @@ class HighLevelPolicy:
             
         except Exception as e:
             logging.warning(f"Error generating subtask with VLM: {e}. Using fallback.")
+            logging.exception(e)  # Log full traceback for debugging
             # Fallback: return general task and select evenly spaced frames
             subtask = general_task
             num_candidates = min(3, len(recent_frames))
@@ -234,39 +271,98 @@ class HighLevelPolicy:
             candidate_indices = frame_indices[::step][:num_candidates]
             return subtask, candidate_indices
 
-    def _create_prompt(self, general_task: str, num_recent: int, num_keyframes: int) -> str:
+    def _create_messages(
+        self, 
+        general_task: str, 
+        keyframe_images: List[Image.Image], 
+        recent_images: List[Image.Image],
+        num_recent: int
+    ) -> List[dict]:
         """
-        Create the prompt for the VLM to generate subtask and select candidate frames.
+        Create the messages for the VLM in the format with system and user roles.
         
         Args:
             general_task: The high-level task
-            num_recent: Number of recent frames provided
-            num_keyframes: Number of keyframes provided
+            keyframe_images: List of PIL Images for keyframes (selected important frames)
+            recent_images: List of PIL Images for recent frames (video context)
+            num_recent: Number of recent frames
             
         Returns:
-            Formatted prompt string
+            List of message dictionaries with system and user roles
         """
-        prompt = f"""You are a robot vision assistant helping to break down tasks into subtasks and identify important frames.
+        # System message with instructions
+        system_content = [
+            {
+                "type": "text",
+                "text": """You are a robot program that predicts actions. The video input from the egocentric camera shows the most recent actions the robot has executed. The images are selected frames of particular importance from all the actions the robot has executed so far. Based on these, output the current subtask the robot should execute and nothing else.
 
-High-level task: {general_task}
+Return a JSON with:
+- current_subtask: the action that should be executed at the current timestep
+- keyframe_positions: list of frame positions (1-indexed) from the VIDEO (recent frames) where important actions occur or change. These positions should only reference frames from the video shown, NOT the selected keyframe images."""
+            }
+        ]
+        
+        # User message with task description, keyframes, and recent frames
+        user_content = [
+            {
+                "type": "text",
+                "text": f"""Task: {general_task}
 
-I'm providing you with:
-- {num_keyframes} keyframes from previous steps (shown first)
-- {num_recent} recent frames from the current observation window (shown after keyframes)
+Here are the selected frames from the entirety of the full video that are of particular importance:"""
+            }
+        ]
+        
+        # Add keyframe images
+        for kf_img in keyframe_images:
+            user_content.append({
+                "type": "image",
+                "image": kf_img
+            })
+        
+        # Add transition text for recent frames (video)
+        user_content.append({
+            "type": "text",
+            "text": "\nHere is a video of the most recent actions the robot has executed:"
+        })
+        
+        # Add recent frames as video
+        # For Qwen models, we can pass them as a sequence of images or as video
+        # We'll use the "video" type if supported, otherwise individual images
+        if self.is_qwen25:
+            # Qwen2.5-VL: Add recent frames as individual images
+            for rf_img in recent_images:
+                user_content.append({
+                    "type": "image",
+                    "image": rf_img
+                })
+        else:
+            # Qwen3-VL supports video type
+            user_content.append({
+                "type": "video",
+                "video": recent_images
+            })
+        
+        # Add example format instruction
+        user_content.append({
+            "type": "text",
+            "text": f"""\n\nAnalyze the video frames (numbered 1 to {num_recent}) and respond with ONLY a JSON object in this format:
+{{"current_subtask": "description of the subtask to execute", "keyframe_positions": [frame_numbers_from_video]}}
 
-Please analyze these frames and provide:
-1. The next subtask that should be executed to progress towards the goal
-2. Which of the recent frames (numbered 1 to {num_recent}) are most relevant for completing this subtask
-
-Format your response as a JSON object with the following structure:
-{{"current_subtask": "your subtask description", "keyframe_positions": [list of frame numbers]}}
-
-Example response:
-{{"current_subtask": "look in the left bin", "keyframe_positions": [1, 3, 5]}}
-
-IMPORTANT: Respond ONLY with the JSON object, no additional text.
-"""
-        return prompt
+Example: {{"current_subtask": "grasp the object", "keyframe_positions": [2, 5, 8]}}"""
+        })
+        
+        messages = [
+            {
+                "role": "system",
+                "content": system_content
+            },
+            {
+                "role": "user",
+                "content": user_content
+            }
+        ]
+        
+        return messages
 
     def _parse_model_output(
         self, output: str, frame_indices: List[int], num_keyframes: int
@@ -341,15 +437,22 @@ def build_visual_memory(
         List of keyframe indices (sorted)
     """
     # Step 1: Collect and sort all candidate indices
+    logging.info(f"[DEBUG] build_visual_memory called with {len(candidate_frame_lists)} candidate lists")
+    logging.info(f"[DEBUG] candidate_frame_lists: {candidate_frame_lists}")
+    
     all_indices = []
     for candidate_list in candidate_frame_lists:
         all_indices.extend(candidate_list)
     
+    logging.info(f"[DEBUG] all_indices collected: {all_indices}")
+    
     if not all_indices:
+        logging.info(f"[DEBUG] No indices found, returning empty list")
         return []
     
     # Sort the indices
     sorted_indices = sorted(all_indices)
+    logging.info(f"[DEBUG] sorted_indices: {sorted_indices}")
     
     # Step 2: Build clusters using single-linkage with distance threshold
     clusters = []
@@ -367,6 +470,8 @@ def build_visual_memory(
     
     # Don't forget the last cluster
     clusters.append(current_cluster)
+    logging.info(f"[DEBUG] Formed {len(clusters)} clusters with distance_threshold={distance_threshold}")
+    logging.info(f"[DEBUG] Clusters: {clusters}")
     
     # Step 3: Select median index from each cluster
     keyframe_indices = []
@@ -375,4 +480,5 @@ def build_visual_memory(
         median_idx = cluster[len(cluster) // 2]
         keyframe_indices.append(median_idx)
     
+    logging.info(f"[DEBUG] Selected keyframe_indices: {keyframe_indices}")
     return sorted(keyframe_indices)

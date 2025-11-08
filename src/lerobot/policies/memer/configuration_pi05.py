@@ -27,12 +27,13 @@ from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 class PI05MemerConfig(PreTrainedConfig):
 
     # High Level Policy Settings (MEMER-specific)
-    camera_key_high_level_policy: str = "observation.images.camera_0"
+    camera_key_high_level_policy: str = "observation.images.cam_high"  # Default camera for VLM
     use_high_level_policy: bool = False  # Enable/disable high-level policy for MEMER
-    high_level_policy_name: str = "Qwen/Qwen3-VL-8B-Instruct"  # VLM for high-level planning
+    high_level_policy_name: str = "Qwen/Qwen2.5-VL-7B-Instruct"  # VLM for high-level planning (supports Qwen2.5-VL and Qwen3-VL)
     recent_frames_window: int = 10  # Number of recent frames to keep (N in paper)
-    max_keyframes: int = 8  # Maximum number of keyframes to maintain
-    keyframe_distance_threshold: int = 10  # Distance threshold for clustering in build_visual_memory
+    recent_frames_sampling_interval: int = 5  # How often to add frames to recent_frames (in steps). e.g., 5 = add every 5th frame
+    max_keyframes: int = 5  # Maximum number of keyframes to maintain
+    keyframe_distance_threshold: int = 5  # Distance threshold for clustering in build_visual_memory
     high_level_query_interval: int = 5  # How often to query high-level policy (in steps)
     
     paligemma_variant: str = "gemma_2b"

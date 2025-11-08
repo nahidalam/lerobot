@@ -94,6 +94,12 @@ dependencies = [
 # Optional dependencies
 [project.optional-dependencies]
 
+#Memer
+memer = ["qwen-vl-utils>=0.0.14",
+        "transformers @ git+https://github.com/huggingface/transformers.git@fix/lerobot_openpi",
+        "moviepy==2.2.1"
+        ]
+
 # Common
 pygame-dep = ["pygame>=2.5.1,<2.7.0"]
 placo-dep = ["placo>=0.9.6,<0.10.0"]

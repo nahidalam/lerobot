@@ -177,3 +177,7 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+# Memer test
+*.mp4
+tests/behavior/**/*.png
