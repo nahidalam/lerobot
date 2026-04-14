@@ -8,6 +8,7 @@ SOURCE_DATASET_REVISION="${SOURCE_DATASET_REVISION:-}"
 PREPARE_ACT_DATASET="${PREPARE_ACT_DATASET:-true}"
 ACT_DATASET_REPO_ID="${ACT_DATASET_REPO_ID:-slobot/aic_act}"
 ACT_DATASET_ROOT="${ACT_DATASET_ROOT:-outputs/datasets/act_ready_slobot_aic}"
+ACT_KEEP_CAMERAS="${ACT_KEEP_CAMERAS:-observation.images.center_camera}"
 JOB_NAME="${JOB_NAME:-act_slobot_aic}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/train/${JOB_NAME}}"
 POLICY_DEVICE="${POLICY_DEVICE:-cuda}"
@@ -22,6 +23,7 @@ if [[ "${PREPARE_ACT_DATASET}" == "true" ]]; then
     "--source-repo-id=${SOURCE_DATASET_REPO_ID}"
     "--prepared-repo-id=${ACT_DATASET_REPO_ID}"
     "--output-dir=${ACT_DATASET_ROOT}"
+    "--keep-cameras=${ACT_KEEP_CAMERAS}"
   )
 
   if [[ -n "${SOURCE_DATASET_ROOT}" ]]; then

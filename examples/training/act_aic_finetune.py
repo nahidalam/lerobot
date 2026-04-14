@@ -72,6 +72,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="Local output directory for the prepared ACT-ready dataset.",
     )
     parser.add_argument(
+        "--keep-cameras",
+        default="observation.images.center_camera",
+        help="Comma-separated camera feature keys to keep in the prepared ACT-ready dataset.",
+    )
+    parser.add_argument(
         "--skip-prepare-dataset",
         action="store_true",
         help="Skip the AIC-to-ACT dataset preparation step and train directly on --dataset-root.",
@@ -250,6 +255,7 @@ def build_prepare_command(args: argparse.Namespace) -> list[str]:
         f"--source-repo-id={args.dataset_repo_id}",
         f"--prepared-repo-id={args.prepared_dataset_repo_id}",
         f"--output-dir={args.prepared_dataset_root}",
+        f"--keep-cameras={args.keep_cameras}",
     ]
     if args.dataset_root:
         command.append(f"--source-root={args.dataset_root}")

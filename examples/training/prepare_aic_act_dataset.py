@@ -22,6 +22,9 @@ The raw dataset stores the target action across two keys:
 ACT in LeRobot expects a single `action` feature, so this script creates a local,
 ACT-ready LeRobot dataset with those two targets concatenated into one 7D action
 vector.
+
+By default it also keeps only the center camera, which reduces GPU memory enough
+for ACT training to start on a single L40S.
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ DEFAULT_SOURCE_REPO_ID = "slobot/aic"
 DEFAULT_PREPARED_REPO_ID = "slobot/aic_act"
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "outputs" / "datasets" / "act_ready_slobot_aic"
+DEFAULT_KEEP_CAMERAS = "observation.images.center_camera"
 
 ACTION_POSITION_KEY = "action.tcp.position"
 ACTION_ORIENTATION_KEY = "action.tcp.orientation"
@@ -83,6 +87,11 @@ def parse_args() -> argparse.Namespace:
         help="Output directory for the prepared ACT-ready dataset.",
     )
     parser.add_argument(
+        "--keep-cameras",
+        default=DEFAULT_KEEP_CAMERAS,
+        help="Comma-separated camera feature keys to keep in the prepared dataset.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Rebuild the prepared dataset even if the output directory already exists.",
@@ -113,6 +122,7 @@ def main() -> int:
     args = parse_args()
     output_dir = Path(args.output_dir).expanduser().resolve()
     info_path = output_dir / "meta" / "info.json"
+    keep_cameras = {camera_key.strip() for camera_key in args.keep_cameras.split(",") if camera_key.strip()}
 
     if info_path.exists() and not args.force:
         print(f"Prepared ACT dataset already exists at: {output_dir}")
@@ -128,6 +138,7 @@ def main() -> int:
         revision=args.source_revision,
     )
     combined_action_stats = compute_combined_action_stats(source_dataset)
+    remove_features = [camera_key for camera_key in source_dataset.meta.camera_keys if camera_key not in keep_cameras]
 
     prepared_dataset = modify_features(
         dataset=source_dataset,
@@ -141,6 +152,7 @@ def main() -> int:
                 },
             )
         },
+        remove_features=remove_features or None,
         output_dir=output_dir,
         repo_id=args.prepared_repo_id,
     )
@@ -151,6 +163,7 @@ def main() -> int:
 
     print(f"Prepared ACT dataset root: {prepared_dataset.root}")
     print(f"Prepared ACT dataset repo_id: {prepared_dataset.repo_id}")
+    print(f"Kept cameras: {sorted(keep_cameras)}")
     return 0
 
 

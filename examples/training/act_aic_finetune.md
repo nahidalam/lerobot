@@ -34,6 +34,8 @@ By default this creates a local dataset at:
 outputs/datasets/act_ready_slobot_aic
 ```
 
+By default the prepared dataset keeps only `observation.images.center_camera` so ACT fits on a single GPU more comfortably.
+
 ## 4. Run the docs-style ACT training command
 
 This is the direct command shape from the LeRobot ACT docs, adapted to the prepared local dataset:
@@ -94,5 +96,12 @@ If your EC2 instance already has an ACT-ready local dataset copy and you want to
 PREPARE_ACT_DATASET=false \
 ACT_DATASET_ROOT=/path/to/local/act_ready_aic_dataset \
 ACT_DATASET_REPO_ID=slobot/aic_act \
+examples/training/train_act_aic.sh
+```
+
+If you want to keep a different camera set when preparing the dataset:
+
+```bash
+ACT_KEEP_CAMERAS=observation.images.center_camera,observation.images.left_camera \
 examples/training/train_act_aic.sh
 ```
