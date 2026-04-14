@@ -33,7 +33,9 @@ from huggingface_hub import HfApi
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 DEFAULT_DATASET_REPO_ID = "slobot/aic"
+DEFAULT_PREPARED_DATASET_REPO_ID = "slobot/aic_act"
 ROOT_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_PREPARED_DATASET_ROOT = ROOT_DIR / "outputs" / "datasets" / "act_ready_slobot_aic"
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
@@ -52,12 +54,27 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--dataset-root",
         default=None,
-        help="Optional local dataset root to use instead of downloading from the Hub.",
+        help="Optional local source dataset root to use instead of downloading from the Hub.",
     )
     parser.add_argument(
         "--revision",
         default=None,
         help="Optional dataset revision to pin when loading from the Hub.",
+    )
+    parser.add_argument(
+        "--prepared-dataset-repo-id",
+        default=DEFAULT_PREPARED_DATASET_REPO_ID,
+        help="Repo ID recorded in the locally prepared ACT-ready dataset.",
+    )
+    parser.add_argument(
+        "--prepared-dataset-root",
+        default=str(DEFAULT_PREPARED_DATASET_ROOT),
+        help="Local output directory for the prepared ACT-ready dataset.",
+    )
+    parser.add_argument(
+        "--skip-prepare-dataset",
+        action="store_true",
+        help="Skip the AIC-to-ACT dataset preparation step and train directly on --dataset-root.",
     )
     parser.add_argument(
         "--job-name",
@@ -175,6 +192,9 @@ def preflight_dataset_access(repo_id: str, revision: str | None) -> None:
 
 
 def build_train_command(args: argparse.Namespace, extra_args: list[str]) -> list[str]:
+    dataset_repo_id = args.prepared_dataset_repo_id if not args.skip_prepare_dataset else args.dataset_repo_id
+    dataset_root = args.prepared_dataset_root if not args.skip_prepare_dataset else args.dataset_root
+
     job_name = args.job_name or f"act_{sanitize_repo_id(args.dataset_repo_id)}"
     output_dir = Path(args.output_dir) if args.output_dir else ROOT_DIR / "outputs" / "train" / job_name
 
@@ -182,7 +202,7 @@ def build_train_command(args: argparse.Namespace, extra_args: list[str]) -> list
         sys.executable,
         "-m",
         "lerobot.scripts.lerobot_train",
-        f"--dataset.repo_id={args.dataset_repo_id}",
+        f"--dataset.repo_id={dataset_repo_id}",
         f"--output_dir={output_dir}",
         f"--job_name={job_name}",
         f"--policy.device={args.policy_device}",
@@ -197,8 +217,8 @@ def build_train_command(args: argparse.Namespace, extra_args: list[str]) -> list
         f"--wandb.enable={bool_flag(args.wandb)}",
     ]
 
-    if args.dataset_root:
-        command.append(f"--dataset.root={args.dataset_root}")
+    if dataset_root:
+        command.append(f"--dataset.root={dataset_root}")
     if args.revision:
         command.append(f"--dataset.revision={args.revision}")
 
@@ -223,6 +243,21 @@ def build_train_command(args: argparse.Namespace, extra_args: list[str]) -> list
     return command
 
 
+def build_prepare_command(args: argparse.Namespace) -> list[str]:
+    command = [
+        sys.executable,
+        str(ROOT_DIR / "examples" / "training" / "prepare_aic_act_dataset.py"),
+        f"--source-repo-id={args.dataset_repo_id}",
+        f"--prepared-repo-id={args.prepared_dataset_repo_id}",
+        f"--output-dir={args.prepared_dataset_root}",
+    ]
+    if args.dataset_root:
+        command.append(f"--source-root={args.dataset_root}")
+    if args.revision:
+        command.append(f"--source-revision={args.revision}")
+    return command
+
+
 def main() -> int:
     args, extra_args = parse_args()
 
@@ -236,6 +271,15 @@ def main() -> int:
 
     if args.check_only:
         return 0
+
+    if not args.skip_prepare_dataset:
+        prepare_command = build_prepare_command(args)
+        print("Preparing ACT-ready dataset:")
+        print(shlex.join(prepare_command))
+        if not args.dry_run:
+            prepare_result = subprocess.run(prepare_command, cwd=ROOT_DIR, check=False)
+            if prepare_result.returncode != 0:
+                return prepare_result.returncode
 
     command = build_train_command(args, extra_args)
     print("Generated training command:")
