@@ -21,7 +21,7 @@ The raw dataset stores the target action across two keys:
 
 ACT in LeRobot expects a single `action` feature, so this script creates a local,
 ACT-ready LeRobot dataset with those two targets concatenated into one 7D action
-vector and removes the original split action keys.
+vector.
 """
 
 from __future__ import annotations
@@ -141,7 +141,6 @@ def main() -> int:
                 },
             )
         },
-        remove_features=[ACTION_POSITION_KEY, ACTION_ORIENTATION_KEY],
         output_dir=output_dir,
         repo_id=args.prepared_repo_id,
     )
