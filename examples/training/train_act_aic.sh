@@ -2,64 +2,80 @@
 
 set -euo pipefail
 
-SOURCE_DATASET_REPO_ID="${SOURCE_DATASET_REPO_ID:-slobot/aic}"
-SOURCE_DATASET_ROOT="${SOURCE_DATASET_ROOT:-}"
-SOURCE_DATASET_REVISION="${SOURCE_DATASET_REVISION:-}"
-PREPARE_ACT_DATASET="${PREPARE_ACT_DATASET:-true}"
-ACT_DATASET_REPO_ID="${ACT_DATASET_REPO_ID:-slobot/aic_act}"
-ACT_DATASET_ROOT="${ACT_DATASET_ROOT:-outputs/datasets/act_ready_slobot_aic}"
+DATASET_REPO_ID="${DATASET_REPO_ID:-${SOURCE_DATASET_REPO_ID:-slobot/aic}}"
+DATASET_ROOT="${DATASET_ROOT:-${SOURCE_DATASET_ROOT:-}}"
+DATASET_REVISION="${DATASET_REVISION:-${SOURCE_DATASET_REVISION:-}}"
 ACT_KEEP_CAMERAS="${ACT_KEEP_CAMERAS:-observation.images.center_camera}"
+TASK_ID_KEY="${TASK_ID_KEY:-auto}"
 JOB_NAME="${JOB_NAME:-act_slobot_aic}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/train/${JOB_NAME}}"
+CONFIG_OUTPUT="${CONFIG_OUTPUT:-}"
 POLICY_DEVICE="${POLICY_DEVICE:-cuda}"
 WANDB_ENABLE="${WANDB_ENABLE:-true}"
+WANDB_PROJECT="${WANDB_PROJECT:-lerobot-act-aic}"
+WANDB_ENTITY="${WANDB_ENTITY:-}"
+WANDB_MODE="${WANDB_MODE:-}"
 POLICY_PATH="${POLICY_PATH:-}"
 POLICY_REPO_ID="${POLICY_REPO_ID:-}"
 PUSH_TO_HUB="${PUSH_TO_HUB:-false}"
-
-if [[ "${PREPARE_ACT_DATASET}" == "true" ]]; then
-  prep_cmd=(
-    uv run python examples/training/prepare_aic_act_dataset.py
-    "--source-repo-id=${SOURCE_DATASET_REPO_ID}"
-    "--prepared-repo-id=${ACT_DATASET_REPO_ID}"
-    "--output-dir=${ACT_DATASET_ROOT}"
-    "--keep-cameras=${ACT_KEEP_CAMERAS}"
-  )
-
-  if [[ -n "${SOURCE_DATASET_ROOT}" ]]; then
-    prep_cmd+=("--source-root=${SOURCE_DATASET_ROOT}")
-  fi
-
-  if [[ -n "${SOURCE_DATASET_REVISION}" ]]; then
-    prep_cmd+=("--source-revision=${SOURCE_DATASET_REVISION}")
-  fi
-
-  printf 'Preparing ACT-ready dataset:\n'
-  printf ' %q' "${prep_cmd[@]}"
-  printf '\n'
-  "${prep_cmd[@]}"
-fi
+CHECK_ONLY="${CHECK_ONLY:-false}"
+DRY_RUN="${DRY_RUN:-false}"
+SKIP_HF_CHECK="${SKIP_HF_CHECK:-false}"
 
 cmd=(
-  uv run lerobot-train
-  "--dataset.repo_id=${ACT_DATASET_REPO_ID}"
-  "--dataset.root=${ACT_DATASET_ROOT}"
-  "--output_dir=${OUTPUT_DIR}"
-  "--job_name=${JOB_NAME}"
-  "--policy.device=${POLICY_DEVICE}"
-  "--wandb.enable=${WANDB_ENABLE}"
-  "--policy.push_to_hub=${PUSH_TO_HUB}"
+  uv run python examples/training/act_aic_finetune.py
+  "--dataset-repo-id=${DATASET_REPO_ID}"
+  "--keep-cameras=${ACT_KEEP_CAMERAS}"
+  "--task-id-key=${TASK_ID_KEY}"
+  "--job-name=${JOB_NAME}"
+  "--output-dir=${OUTPUT_DIR}"
+  "--policy-device=${POLICY_DEVICE}"
 )
 
+if [[ -n "${DATASET_ROOT}" ]]; then
+  cmd+=("--dataset-root=${DATASET_ROOT}")
+fi
+
+if [[ -n "${DATASET_REVISION}" ]]; then
+  cmd+=("--revision=${DATASET_REVISION}")
+fi
+
+if [[ -n "${CONFIG_OUTPUT}" ]]; then
+  cmd+=("--config-output=${CONFIG_OUTPUT}")
+fi
+
 if [[ -n "${POLICY_PATH}" ]]; then
-  cmd+=("--policy.path=${POLICY_PATH}")
-else
-  cmd+=("--policy.type=act")
+  cmd+=("--policy-path=${POLICY_PATH}")
+fi
+
+if [[ "${WANDB_ENABLE}" == "true" ]]; then
+  cmd+=("--wandb")
+  cmd+=("--wandb-project=${WANDB_PROJECT}")
+  if [[ -n "${WANDB_ENTITY}" ]]; then
+    cmd+=("--wandb-entity=${WANDB_ENTITY}")
+  fi
+  if [[ -n "${WANDB_MODE}" ]]; then
+    cmd+=("--wandb-mode=${WANDB_MODE}")
+  fi
 fi
 
 if [[ -n "${POLICY_REPO_ID}" ]]; then
-  cmd+=("--policy.repo_id=${POLICY_REPO_ID}")
-  cmd+=("--policy.push_to_hub=true")
+  cmd+=("--policy-repo-id=${POLICY_REPO_ID}")
+  cmd+=("--push-to-hub")
+elif [[ "${PUSH_TO_HUB}" == "true" ]]; then
+  cmd+=("--push-to-hub")
+fi
+
+if [[ "${CHECK_ONLY}" == "true" ]]; then
+  cmd+=("--check-only")
+fi
+
+if [[ "${DRY_RUN}" == "true" ]]; then
+  cmd+=("--dry-run")
+fi
+
+if [[ "${SKIP_HF_CHECK}" == "true" ]]; then
+  cmd+=("--skip-hf-check")
 fi
 
 if [[ $# -gt 0 ]]; then

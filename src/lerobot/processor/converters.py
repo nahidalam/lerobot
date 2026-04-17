@@ -26,6 +26,24 @@ import torch
 from lerobot.types import EnvTransition, PolicyAction, RobotAction, RobotObservation, TransitionKey
 from lerobot.utils.constants import ACTION, DONE, INFO, OBS_PREFIX, REWARD, TRUNCATED
 
+AIC_ACTION_POSITION_KEY = "action.tcp.position"
+AIC_ACTION_ORIENTATION_KEY = "action.tcp.orientation"
+AIC_ACTION_POSITION_PAD_KEY = f"{AIC_ACTION_POSITION_KEY}_is_pad"
+AIC_ACTION_ORIENTATION_PAD_KEY = f"{AIC_ACTION_ORIENTATION_KEY}_is_pad"
+
+
+def _extract_policy_action(batch: dict[str, Any]) -> PolicyAction | None:
+    action = batch.get(ACTION)
+    if action is not None:
+        if not isinstance(action, PolicyAction):
+            raise ValueError(f"Action should be a PolicyAction type got {type(action)}")
+        return action
+
+    if AIC_ACTION_POSITION_KEY in batch and AIC_ACTION_ORIENTATION_KEY in batch:
+        return torch.cat([batch[AIC_ACTION_POSITION_KEY], batch[AIC_ACTION_ORIENTATION_KEY]], dim=-1)
+
+    return None
+
 
 @singledispatch
 def to_tensor(
@@ -166,6 +184,12 @@ def _extract_complementary_data(batch: dict[str, Any]) -> dict[str, Any]:
         A dictionary with the extracted complementary data.
     """
     pad_keys = {k: v for k, v in batch.items() if "_is_pad" in k}
+    if (
+        "action_is_pad" not in pad_keys
+        and AIC_ACTION_POSITION_PAD_KEY in batch
+        and AIC_ACTION_ORIENTATION_PAD_KEY in batch
+    ):
+        pad_keys["action_is_pad"] = batch[AIC_ACTION_POSITION_PAD_KEY]
     task_key = {"task": batch["task"]} if "task" in batch else {}
     subtask_key = {"subtask": batch["subtask"]} if "subtask" in batch else {}
     index_key = {"index": batch["index"]} if "index" in batch else {}
@@ -345,9 +369,7 @@ def batch_to_transition(batch: dict[str, Any]) -> EnvTransition:
     if not isinstance(batch, dict):
         raise ValueError(f"EnvTransition must be a dictionary. Got {type(batch).__name__}")
 
-    action = batch.get(ACTION)
-    if action is not None and not isinstance(action, PolicyAction):
-        raise ValueError(f"Action should be a PolicyAction type got {type(action)}")
+    action = _extract_policy_action(batch)
 
     # Extract observation and complementary data keys.
     observation_keys = {k: v for k, v in batch.items() if k.startswith(OBS_PREFIX)}
@@ -355,7 +377,7 @@ def batch_to_transition(batch: dict[str, Any]) -> EnvTransition:
 
     return create_transition(
         observation=observation_keys if observation_keys else None,
-        action=batch.get(ACTION),
+        action=action,
         reward=batch.get(REWARD, 0.0),
         done=batch.get(DONE, False),
         truncated=batch.get(TRUNCATED, False),

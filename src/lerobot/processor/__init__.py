@@ -63,6 +63,7 @@ from .hil_processor import (
 )
 from .newline_task_processor import NewLineTaskProcessorStep
 from .normalize_processor import NormalizerProcessorStep, UnnormalizerProcessorStep, hotswap_stats
+from .observation_key_processor import CastObservationKeysProcessorStep, SelectObservationKeysProcessorStep
 from .observation_processor import VanillaObservationProcessorStep
 from .pipeline import (
     ActionProcessorStep,
@@ -100,6 +101,7 @@ __all__ = [
     "AddTeleopActionAsComplimentaryDataStep",
     "AddTeleopEventsAsInfoStep",
     "ComplementaryDataProcessorStep",
+    "CastObservationKeysProcessorStep",
     "batch_to_transition",
     "create_transition",
     "from_tensor_to_numpy",
@@ -134,6 +136,7 @@ __all__ = [
     "NormalizerProcessorStep",
     "Numpy2TorchActionProcessorStep",
     "ObservationProcessorStep",
+    "SelectObservationKeysProcessorStep",
     "PolicyAction",
     "PolicyActionProcessorStep",
     "PolicyProcessorPipeline",

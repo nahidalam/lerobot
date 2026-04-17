@@ -19,15 +19,18 @@ import torch
 
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
+    CastObservationKeysProcessorStep,
     DeviceProcessorStep,
     NormalizerProcessorStep,
     PolicyAction,
     PolicyProcessorPipeline,
     RenameObservationsProcessorStep,
+    SelectObservationKeysProcessorStep,
     UnnormalizerProcessorStep,
     policy_action_to_transition,
     transition_to_policy_action,
 )
+from lerobot.utils.constants import OBS_ENV_STATE
 from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
 
 from .configuration_act import ACTConfig
@@ -36,6 +39,7 @@ from .configuration_act import ACTConfig
 def make_act_pre_post_processors(
     config: ACTConfig,
     dataset_stats: dict[str, dict[str, torch.Tensor]] | None = None,
+    rename_map: dict[str, str] | None = None,
 ) -> tuple[
     PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
     PolicyProcessorPipeline[PolicyAction, PolicyAction],
@@ -56,7 +60,11 @@ def make_act_pre_post_processors(
     """
 
     input_steps = [
-        RenameObservationsProcessorStep(rename_map={}),
+        RenameObservationsProcessorStep(rename_map=rename_map or {}),
+        SelectObservationKeysProcessorStep(keep_keys=sorted(config.input_features or {})),
+        CastObservationKeysProcessorStep(
+            cast_keys=[OBS_ENV_STATE] if config.env_state_feature is not None else []
+        ),
         AddBatchDimensionProcessorStep(),
         DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(

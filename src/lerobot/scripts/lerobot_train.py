@@ -57,6 +57,43 @@ from lerobot.utils.utils import (
     init_logging,
     inside_slurm,
 )
+from lerobot.utils.constants import ACTION
+
+AIC_ACTION_POSITION_KEY = "action.tcp.position"
+AIC_ACTION_ORIENTATION_KEY = "action.tcp.orientation"
+
+
+def _maybe_add_combined_action_stats(
+    stats: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]] | None:
+    if not stats or ACTION in stats:
+        return stats
+
+    if AIC_ACTION_POSITION_KEY not in stats or AIC_ACTION_ORIENTATION_KEY not in stats:
+        return stats
+
+    position_stats = stats[AIC_ACTION_POSITION_KEY]
+    orientation_stats = stats[AIC_ACTION_ORIENTATION_KEY]
+    shared_stat_keys = [
+        key
+        for key in ("mean", "std", "min", "max", "q01", "q10", "q90", "q99")
+        if key in position_stats and key in orientation_stats
+    ]
+    if not shared_stat_keys:
+        return stats
+
+    merged_stats = dict(stats)
+    merged_stats[ACTION] = {
+        key: torch.cat(
+            [
+                torch.as_tensor(position_stats[key], dtype=torch.float32),
+                torch.as_tensor(orientation_stats[key], dtype=torch.float32),
+            ],
+            dim=-1,
+        )
+        for key in shared_stat_keys
+    }
+    return merged_stats
 
 from .lerobot_eval import eval_policy_all
 
@@ -237,6 +274,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     if not is_main_process:
         dataset = make_dataset(cfg)
 
+    dataset.meta.stats = _maybe_add_combined_action_stats(dataset.meta.stats)
+
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,
     # using the eval.py instead, with gym_dora environment and dora-rs.
@@ -280,6 +319,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     if (processor_pretrained_path and not cfg.resume) or not processor_pretrained_path:
         # Only provide dataset_stats when not resuming from saved processor state
         processor_kwargs["dataset_stats"] = dataset.meta.stats
+        processor_kwargs["rename_map"] = cfg.rename_map
 
     # For SARM, always provide dataset_meta for progress normalization
     if cfg.policy.type == "sarm":

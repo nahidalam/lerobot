@@ -25,6 +25,11 @@ vector.
 
 By default it also keeps only the center camera, which reduces GPU memory enough
 for ACT training to start on a single L40S.
+
+This helper is now a legacy fallback for older dataset snapshots. If `slobot/aic`
+already exposes a top-level `action` feature, prefer
+`examples/training/act_aic_finetune.py`, which trains directly from the source
+dataset without creating an intermediate local copy.
 """
 
 from __future__ import annotations
