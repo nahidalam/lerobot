@@ -26,6 +26,8 @@ import torch
 from lerobot.types import EnvTransition, PolicyAction, RobotAction, RobotObservation, TransitionKey
 from lerobot.utils.constants import ACTION, DONE, INFO, OBS_PREFIX, REWARD, TRUNCATED
 
+AIC_ACTION_OFFSET_KEY = "action.tcp_offset"
+AIC_ACTION_OFFSET_PAD_KEY = f"{AIC_ACTION_OFFSET_KEY}_is_pad"
 AIC_ACTION_POSITION_KEY = "action.tcp.position"
 AIC_ACTION_ORIENTATION_KEY = "action.tcp.orientation"
 AIC_ACTION_POSITION_PAD_KEY = f"{AIC_ACTION_POSITION_KEY}_is_pad"
@@ -38,6 +40,9 @@ def _extract_policy_action(batch: dict[str, Any]) -> PolicyAction | None:
         if not isinstance(action, PolicyAction):
             raise ValueError(f"Action should be a PolicyAction type got {type(action)}")
         return action
+
+    if AIC_ACTION_OFFSET_KEY in batch:
+        return batch[AIC_ACTION_OFFSET_KEY]
 
     if AIC_ACTION_POSITION_KEY in batch and AIC_ACTION_ORIENTATION_KEY in batch:
         return torch.cat([batch[AIC_ACTION_POSITION_KEY], batch[AIC_ACTION_ORIENTATION_KEY]], dim=-1)
@@ -184,12 +189,11 @@ def _extract_complementary_data(batch: dict[str, Any]) -> dict[str, Any]:
         A dictionary with the extracted complementary data.
     """
     pad_keys = {k: v for k, v in batch.items() if "_is_pad" in k}
-    if (
-        "action_is_pad" not in pad_keys
-        and AIC_ACTION_POSITION_PAD_KEY in batch
-        and AIC_ACTION_ORIENTATION_PAD_KEY in batch
-    ):
-        pad_keys["action_is_pad"] = batch[AIC_ACTION_POSITION_PAD_KEY]
+    if "action_is_pad" not in pad_keys:
+        if AIC_ACTION_OFFSET_PAD_KEY in batch:
+            pad_keys["action_is_pad"] = batch[AIC_ACTION_OFFSET_PAD_KEY]
+        elif AIC_ACTION_POSITION_PAD_KEY in batch and AIC_ACTION_ORIENTATION_PAD_KEY in batch:
+            pad_keys["action_is_pad"] = batch[AIC_ACTION_POSITION_PAD_KEY]
     task_key = {"task": batch["task"]} if "task" in batch else {}
     subtask_key = {"subtask": batch["subtask"]} if "subtask" in batch else {}
     index_key = {"index": batch["index"]} if "index" in batch else {}
@@ -373,6 +377,8 @@ def batch_to_transition(batch: dict[str, Any]) -> EnvTransition:
 
     # Extract observation and complementary data keys.
     observation_keys = {k: v for k, v in batch.items() if k.startswith(OBS_PREFIX)}
+    if "task_id" in batch and "task_id" not in observation_keys:
+        observation_keys["task_id"] = batch["task_id"]
     complementary_data = _extract_complementary_data(batch)
 
     return create_transition(

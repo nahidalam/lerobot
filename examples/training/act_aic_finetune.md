@@ -38,8 +38,9 @@ uv run python examples/training/act_aic_finetune.py --wandb
 What this helper does before it launches `lerobot-train`:
 
 - reads the dataset metadata from `slobot/aic`
+- prefers `action.tcp_offset` as the ACT action target, with a legacy fallback for older split TCP action keys
 - keeps only the requested camera keys in ACT inputs
-- routes `task_id` into `observation.environment_state`
+- routes `task_id` into `observation.environment_state` when that key is present
 - disables normalization for that env-state input
 - writes a generated JSON train config, then runs `lerobot-train --config_path=...`
 
@@ -125,7 +126,7 @@ DRY_RUN=true examples/training/train_act_aic.sh
 
 If you ever need to work with an older `slobot/aic` snapshot that still stores the
 target action in separate `action.tcp.position` and `action.tcp.orientation`
-features, the old dataset-prep helper is still available:
+features instead of `action.tcp_offset`, the old dataset-prep helper is still available:
 
 ```bash
 uv run python examples/training/prepare_aic_act_dataset.py

@@ -33,6 +33,7 @@ import argparse
 import shlex
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import draccus
 from huggingface_hub import HfApi
@@ -40,7 +41,7 @@ from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 from lerobot.configs import DatasetConfig, FeatureType, NormalizationMode, PolicyFeature, WandBConfig
 from lerobot.configs.train import TrainPipelineConfig
-from lerobot.datasets import LeRobotDatasetMetadata
+from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.policies.act import ACTConfig
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE
 from lerobot.utils.feature_utils import dataset_to_policy_features
@@ -50,17 +51,43 @@ DEFAULT_KEEP_CAMERAS = "observation.images.center_camera"
 DEFAULT_TASK_ID_KEY = "auto"
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_DIR = ROOT_DIR / "outputs" / "generated_configs"
+AIC_ACTION_OFFSET_KEY = "action.tcp_offset"
 AIC_ACTION_POSITION_KEY = "action.tcp.position"
 AIC_ACTION_ORIENTATION_KEY = "action.tcp.orientation"
-AIC_ACTION_NAMES = [
-    "tcp.position.x",
-    "tcp.position.y",
-    "tcp.position.z",
-    "tcp.orientation.x",
-    "tcp.orientation.y",
-    "tcp.orientation.z",
-    "tcp.orientation.w",
-]
+
+
+def load_probe_sample(
+    repo_id: str,
+    root: str | None,
+    revision: str | None,
+) -> dict[str, Any] | None:
+    try:
+        dataset = LeRobotDataset(
+            repo_id,
+            root=root,
+            revision=revision,
+            episodes=[0],
+        )
+    except Exception:
+        return None
+
+    try:
+        return dataset[0]
+    except Exception:
+        return None
+
+
+def infer_feature_shape(value: Any) -> tuple[int, ...]:
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        parsed_shape = tuple(int(dim) for dim in shape)
+        return parsed_shape or (1,)
+
+    try:
+        length = len(value)
+    except TypeError:
+        return (1,)
+    return (int(length),)
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
@@ -229,14 +256,18 @@ def parse_keep_cameras(value: str) -> set[str] | None:
     return keep_cameras
 
 
-def resolve_task_id_key(dataset_features: dict[str, dict], requested_key: str) -> str | None:
+def resolve_task_id_key(
+    dataset_features: dict[str, dict],
+    requested_key: str,
+    sample_keys: set[str] | None = None,
+) -> str | None:
     if requested_key.lower() == "none":
         return None
 
     if requested_key != "auto":
-        if requested_key not in dataset_features:
+        if requested_key not in dataset_features and (sample_keys is None or requested_key not in sample_keys):
             raise SystemExit(
-                f"Requested task-id key '{requested_key}' was not found in the dataset features."
+                f"Requested task-id key '{requested_key}' was not found in the dataset metadata or sample keys."
             )
         return requested_key
 
@@ -246,10 +277,21 @@ def resolve_task_id_key(dataset_features: dict[str, dict], requested_key: str) -
         "task_id",
     ]
     for key in preferred_keys:
-        if key in dataset_features:
+        if key in dataset_features or (sample_keys is not None and key in sample_keys):
             return key
 
-    suffix_matches = sorted(key for key in dataset_features if key.endswith(".task_id"))
+    suffix_matches = sorted(
+        {
+            key
+            for key in dataset_features
+            if key.endswith(".task_id")
+        }
+        | {
+            key
+            for key in (sample_keys or set())
+            if key.endswith(".task_id")
+        }
+    )
     if len(suffix_matches) == 1:
         return suffix_matches[0]
     if len(suffix_matches) > 1:
@@ -265,10 +307,18 @@ def build_policy_features(
     dataset_features: dict[str, dict],
     keep_cameras: set[str] | None,
     task_id_key: str | None,
-) -> tuple[dict[str, PolicyFeature], dict[str, PolicyFeature], dict[str, str], list[str]]:
+    sample: dict[str, Any] | None = None,
+) -> tuple[dict[str, PolicyFeature], dict[str, PolicyFeature], dict[str, str], list[str], str]:
     policy_features = dataset_to_policy_features(dataset_features)
+    action_source = ACTION
     if ACTION not in policy_features:
-        if (
+        if AIC_ACTION_OFFSET_KEY in policy_features:
+            policy_features[ACTION] = PolicyFeature(
+                type=FeatureType.ACTION,
+                shape=policy_features[AIC_ACTION_OFFSET_KEY].shape,
+            )
+            action_source = f"{AIC_ACTION_OFFSET_KEY} -> {ACTION}"
+        elif (
             AIC_ACTION_POSITION_KEY in policy_features
             and AIC_ACTION_ORIENTATION_KEY in policy_features
         ):
@@ -276,19 +326,16 @@ def build_policy_features(
                 policy_features[AIC_ACTION_POSITION_KEY].shape[0]
                 + policy_features[AIC_ACTION_ORIENTATION_KEY].shape[0]
             )
-            if total_action_dim != len(AIC_ACTION_NAMES):
-                raise SystemExit(
-                    "Unable to synthesize the ACT action feature because the raw AIC action dimensions do "
-                    f"not match the expected 7D shape. Got {total_action_dim} dimensions."
-                )
             policy_features[ACTION] = PolicyFeature(
                 type=FeatureType.ACTION,
-                shape=(len(AIC_ACTION_NAMES),),
+                shape=(total_action_dim,),
             )
+            action_source = f"{AIC_ACTION_POSITION_KEY} + {AIC_ACTION_ORIENTATION_KEY} -> {ACTION}"
         else:
             raise SystemExit(
                 f"The dataset does not expose a top-level '{ACTION}' feature, and the expected raw AIC "
-                f"action fields ({AIC_ACTION_POSITION_KEY}, {AIC_ACTION_ORIENTATION_KEY}) were not both found."
+                f"action fields ({AIC_ACTION_OFFSET_KEY}) or ({AIC_ACTION_POSITION_KEY}, "
+                f"{AIC_ACTION_ORIENTATION_KEY}) were not found."
             )
 
     available_cameras = sorted(
@@ -324,14 +371,19 @@ def build_policy_features(
         else:
             env_feature = input_features.pop(task_id_key, None)
             if env_feature is None:
-                raise SystemExit(
-                    f"Resolved task-id key '{task_id_key}' is not part of the ACT input features."
+                if sample is None or task_id_key not in sample:
+                    raise SystemExit(
+                        f"Resolved task-id key '{task_id_key}' is not part of the ACT input features."
+                    )
+                env_feature = PolicyFeature(
+                    type=FeatureType.ENV,
+                    shape=infer_feature_shape(sample[task_id_key]),
                 )
             rename_map[task_id_key] = OBS_ENV_STATE
 
         input_features[OBS_ENV_STATE] = PolicyFeature(type=FeatureType.ENV, shape=env_feature.shape)
 
-    return input_features, output_features, rename_map, available_cameras
+    return input_features, output_features, rename_map, available_cameras, action_source
 
 
 def write_train_config(config: TrainPipelineConfig, config_path: Path) -> None:
@@ -428,11 +480,26 @@ def main() -> int:
     )
 
     keep_cameras = parse_keep_cameras(args.keep_cameras)
-    task_id_key = resolve_task_id_key(dataset_meta.features, args.task_id_key)
-    input_features, output_features, rename_map, available_cameras = build_policy_features(
+    probe_sample = None
+    if args.task_id_key != "none" and (
+        args.task_id_key == "auto" or args.task_id_key not in dataset_meta.features
+    ):
+        probe_sample = load_probe_sample(
+            args.dataset_repo_id,
+            root=args.dataset_root,
+            revision=args.revision,
+        )
+
+    task_id_key = resolve_task_id_key(
+        dataset_meta.features,
+        args.task_id_key,
+        sample_keys=set(probe_sample) if probe_sample is not None else None,
+    )
+    input_features, output_features, rename_map, available_cameras, action_source = build_policy_features(
         dataset_meta.features,
         keep_cameras=keep_cameras,
         task_id_key=task_id_key,
+        sample=probe_sample,
     )
     cfg, config_path = build_train_config(args, input_features, output_features, rename_map)
     write_train_config(cfg, config_path)
@@ -440,6 +507,7 @@ def main() -> int:
     selected_cameras = sorted(key for key, feature in input_features.items() if feature.type is FeatureType.VISUAL)
     print(f"Generated train config: {config_path}")
     print(f"Dataset repo: {args.dataset_repo_id}")
+    print(f"Action source: {action_source}")
     print(f"Available cameras: {available_cameras}")
     print(f"Selected cameras: {selected_cameras}")
     if task_id_key is None:

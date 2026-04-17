@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prepare `slobot/aic` for ACT training.
+"""Prepare an older `slobot/aic` snapshot for ACT training.
 
 The raw dataset stores the target action across two keys:
 `action.tcp.position` and `action.tcp.orientation`.

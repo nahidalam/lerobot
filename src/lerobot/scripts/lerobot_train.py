@@ -59,6 +59,7 @@ from lerobot.utils.utils import (
 )
 from lerobot.utils.constants import ACTION
 
+AIC_ACTION_OFFSET_KEY = "action.tcp_offset"
 AIC_ACTION_POSITION_KEY = "action.tcp.position"
 AIC_ACTION_ORIENTATION_KEY = "action.tcp.orientation"
 
@@ -68,6 +69,20 @@ def _maybe_add_combined_action_stats(
 ) -> dict[str, dict[str, Any]] | None:
     if not stats or ACTION in stats:
         return stats
+
+    if AIC_ACTION_OFFSET_KEY in stats:
+        offset_stats = stats[AIC_ACTION_OFFSET_KEY]
+        shared_stat_keys = [
+            key for key in ("mean", "std", "min", "max", "q01", "q10", "q90", "q99") if key in offset_stats
+        ]
+        if not shared_stat_keys:
+            return stats
+
+        merged_stats = dict(stats)
+        merged_stats[ACTION] = {
+            key: torch.as_tensor(offset_stats[key], dtype=torch.float32) for key in shared_stat_keys
+        }
+        return merged_stats
 
     if AIC_ACTION_POSITION_KEY not in stats or AIC_ACTION_ORIENTATION_KEY not in stats:
         return stats
