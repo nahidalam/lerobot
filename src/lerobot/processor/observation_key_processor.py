@@ -99,11 +99,26 @@ class ConcatObservationKeysProcessorStep(ObservationProcessorStep):
     output_key: str = ""
     drop_source_keys: bool = True
 
-    def _to_concat_tensor(self, value: Any) -> torch.Tensor:
-        tensor = torch.as_tensor(value)
-        if tensor.ndim == 0:
-            return tensor.reshape(1)
-        return tensor
+    def _prepare_tensors(self, observation: dict[str, Any]) -> list[torch.Tensor]:
+        tensors = [torch.as_tensor(observation[key]) for key in self.source_keys]
+
+        batch_size = next((tensor.shape[0] for tensor in tensors if tensor.ndim > 1), None)
+        prepared: list[torch.Tensor] = []
+        for tensor in tensors:
+            if tensor.ndim == 0:
+                prepared.append(tensor.reshape(1, 1))
+                continue
+
+            if tensor.ndim == 1:
+                if batch_size is not None and tensor.shape[0] == batch_size:
+                    prepared.append(tensor.reshape(batch_size, 1))
+                else:
+                    prepared.append(tensor.reshape(1, -1))
+                continue
+
+            prepared.append(tensor.reshape(tensor.shape[0], -1))
+
+        return prepared
 
     def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
         if not self.output_key or not self.source_keys:
@@ -112,7 +127,7 @@ class ConcatObservationKeysProcessorStep(ObservationProcessorStep):
             return observation
 
         new_observation = dict(observation)
-        tensors = [self._to_concat_tensor(new_observation[key]) for key in self.source_keys]
+        tensors = self._prepare_tensors(new_observation)
         new_observation[self.output_key] = torch.cat(tensors, dim=-1)
 
         if self.drop_source_keys:
