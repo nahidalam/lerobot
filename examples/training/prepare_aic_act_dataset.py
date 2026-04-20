@@ -14,14 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prepare an older `slobot/aic` snapshot for ACT training.
+"""Prepare `slobot/aic` for ACT training.
 
-The raw dataset stores the target action across two keys:
-`action.tcp.position` and `action.tcp.orientation`.
+The current dataset stores the target action in `action.tcp_offset`. Older
+snapshots stored it across two keys: `action.tcp.position` and
+`action.tcp.orientation`.
 
 ACT in LeRobot expects a single `action` feature, so this script creates a local,
-ACT-ready LeRobot dataset with those two targets concatenated into one 7D action
-vector.
+ACT-ready LeRobot dataset with that action copied or synthesized into a top-level
+`action` vector.
 
 By default it also keeps only the center camera, which reduces GPU memory enough
 for ACT training to start on a single L40S.
@@ -36,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -50,10 +52,11 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "outputs" / "datasets" / "act_ready_slobot_aic"
 DEFAULT_KEEP_CAMERAS = "observation.images.center_camera"
 
+ACTION_OFFSET_KEY = "action.tcp_offset"
 ACTION_POSITION_KEY = "action.tcp.position"
 ACTION_ORIENTATION_KEY = "action.tcp.orientation"
 COMBINED_ACTION_KEY = "action"
-COMBINED_ACTION_NAMES = [
+LEGACY_COMBINED_ACTION_NAMES = [
     "tcp.position.x",
     "tcp.position.y",
     "tcp.position.z",
@@ -104,17 +107,54 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def make_combined_action(row: dict, _episode_idx: int, _frame_in_ep: int) -> np.ndarray:
+def resolve_action_source(dataset: LeRobotDataset) -> tuple[str, tuple[int, ...], list[str]]:
+    features = dataset.meta.features
+    if ACTION_OFFSET_KEY in features:
+        source_feature = features[ACTION_OFFSET_KEY]
+        return (
+            ACTION_OFFSET_KEY,
+            tuple(source_feature["shape"]),
+            list(source_feature.get("names") or []),
+        )
+
+    if ACTION_POSITION_KEY in features and ACTION_ORIENTATION_KEY in features:
+        position_shape = tuple(features[ACTION_POSITION_KEY]["shape"])
+        orientation_shape = tuple(features[ACTION_ORIENTATION_KEY]["shape"])
+        names = list(features[ACTION_POSITION_KEY].get("names") or []) + list(
+            features[ACTION_ORIENTATION_KEY].get("names") or []
+        )
+        if not names:
+            names = LEGACY_COMBINED_ACTION_NAMES
+        return "legacy_split_tcp", (position_shape[0] + orientation_shape[0],), names
+
+    raise SystemExit(
+        "Unable to prepare ACT action data because none of the expected source keys were found. "
+        f"Expected one of: {ACTION_OFFSET_KEY} or ({ACTION_POSITION_KEY}, {ACTION_ORIENTATION_KEY})."
+    )
+
+
+def make_combined_action(
+    row: dict,
+    _episode_idx: int,
+    _frame_in_ep: int,
+    action_source: str,
+) -> np.ndarray:
+    if action_source == ACTION_OFFSET_KEY:
+        return np.asarray(row[ACTION_OFFSET_KEY], dtype=np.float32)
+
     position = np.asarray(row[ACTION_POSITION_KEY], dtype=np.float32)
     orientation = np.asarray(row[ACTION_ORIENTATION_KEY], dtype=np.float32)
     return np.concatenate([position, orientation], axis=0)
 
 
-def compute_combined_action_stats(dataset: LeRobotDataset) -> dict[str, list[float]]:
+def compute_combined_action_stats(dataset: LeRobotDataset, action_source: str) -> dict[str, list[float]]:
     hf_dataset = dataset.hf_dataset.with_format(None)
-    positions = np.asarray(hf_dataset[ACTION_POSITION_KEY], dtype=np.float32)
-    orientations = np.asarray(hf_dataset[ACTION_ORIENTATION_KEY], dtype=np.float32)
-    actions = np.concatenate([positions, orientations], axis=1)
+    if action_source == ACTION_OFFSET_KEY:
+        actions = np.asarray(hf_dataset[ACTION_OFFSET_KEY], dtype=np.float32)
+    else:
+        positions = np.asarray(hf_dataset[ACTION_POSITION_KEY], dtype=np.float32)
+        orientations = np.asarray(hf_dataset[ACTION_ORIENTATION_KEY], dtype=np.float32)
+        actions = np.concatenate([positions, orientations], axis=1)
     return {
         "mean": actions.mean(axis=0).tolist(),
         "std": actions.std(axis=0).tolist(),
@@ -142,18 +182,19 @@ def main() -> int:
         root=args.source_root,
         revision=args.source_revision,
     )
-    combined_action_stats = compute_combined_action_stats(source_dataset)
+    action_source, action_shape, action_names = resolve_action_source(source_dataset)
+    combined_action_stats = compute_combined_action_stats(source_dataset, action_source)
     remove_features = [camera_key for camera_key in source_dataset.meta.camera_keys if camera_key not in keep_cameras]
 
     prepared_dataset = modify_features(
         dataset=source_dataset,
         add_features={
             COMBINED_ACTION_KEY: (
-                make_combined_action,
+                partial(make_combined_action, action_source=action_source),
                 {
                     "dtype": "float32",
-                    "shape": (len(COMBINED_ACTION_NAMES),),
-                    "names": COMBINED_ACTION_NAMES,
+                    "shape": action_shape,
+                    "names": action_names,
                 },
             )
         },
@@ -168,6 +209,7 @@ def main() -> int:
 
     print(f"Prepared ACT dataset root: {prepared_dataset.root}")
     print(f"Prepared ACT dataset repo_id: {prepared_dataset.repo_id}")
+    print(f"Action source: {action_source} -> {COMBINED_ACTION_KEY}")
     print(f"Kept cameras: {sorted(keep_cameras)}")
     return 0
 
