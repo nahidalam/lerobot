@@ -43,7 +43,7 @@ from lerobot.configs import DatasetConfig, FeatureType, NormalizationMode, Polic
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.policies.act import ACTConfig
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_STATE
 from lerobot.utils.feature_utils import dataset_to_policy_features
 
 DEFAULT_DATASET_REPO_ID = "slobot/aic"
@@ -51,12 +51,26 @@ DEFAULT_KEEP_CAMERAS = "all"
 DEFAULT_TASK_ID_KEY = "auto"
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_DIR = ROOT_DIR / "outputs" / "generated_configs"
-AIC_OBS_TCP_OFFSET_KEY = "observation.tcp_offset"
 AIC_ACTION_OFFSET_KEY = "action.tcp_offset"
 AIC_ACTION_POSITION_KEY = "action.tcp.position"
 AIC_ACTION_ORIENTATION_KEY = "action.tcp.orientation"
-AIC_TASK_ID_INPUT_KEY = "observation.aic_task_id"
-AIC_TCP_OFFSET_INPUT_KEY = "observation.aic_tcp_offset"
+AIC_ACTION_OFFSET_COMPONENT_KEYS = [
+    "action.tcp_offset.linear.x",
+    "action.tcp_offset.linear.y",
+    "action.tcp_offset.linear.z",
+    "action.tcp_offset.angular.x",
+    "action.tcp_offset.angular.y",
+    "action.tcp_offset.angular.z",
+]
+AIC_OBS_TCP_OFFSET_KEY = "observation.tcp_offset"
+AIC_OBS_TCP_OFFSET_COMPONENT_KEYS = [
+    "observation.tcp_offset.linear.x",
+    "observation.tcp_offset.linear.y",
+    "observation.tcp_offset.linear.z",
+    "observation.tcp_offset.angular.x",
+    "observation.tcp_offset.angular.y",
+    "observation.tcp_offset.angular.z",
+]
 
 
 def load_probe_sample(
@@ -259,68 +273,88 @@ def parse_keep_cameras(value: str) -> set[str] | None:
     return keep_cameras
 
 
-def resolve_task_id_key(
+def resolve_task_id_keys(
     dataset_features: dict[str, dict],
     requested_key: str,
     sample_keys: set[str] | None = None,
-) -> str | None:
+) -> list[str]:
     if requested_key.lower() == "none":
-        return None
+        return []
 
     if requested_key != "auto":
-        if requested_key not in dataset_features and (sample_keys is None or requested_key not in sample_keys):
+        requested_keys = [key.strip() for key in requested_key.split(",") if key.strip()]
+        missing = [
+            key
+            for key in requested_keys
+            if key not in dataset_features and (sample_keys is None or key not in sample_keys)
+        ]
+        if missing:
             raise SystemExit(
-                f"Requested task-id key '{requested_key}' was not found in the dataset metadata or sample keys."
+                f"Requested task-id keys were not found in the dataset metadata or sample keys: {missing}"
             )
-        return requested_key
+        return requested_keys
 
-    preferred_keys = [
-        OBS_ENV_STATE,
-        "observation.task_id",
-        "task_id",
-    ]
-    for key in preferred_keys:
-        if key in dataset_features or (sample_keys is not None and key in sample_keys):
-            return key
-
-    suffix_matches = sorted(
+    prefixed_keys = sorted(
         {
             key
             for key in dataset_features
-            if key.endswith(".task_id")
+            if key.startswith("observation.task_id.")
         }
         | {
             key
             for key in (sample_keys or set())
-            if key.endswith(".task_id")
+            if key.startswith("observation.task_id.")
         }
     )
-    if len(suffix_matches) == 1:
-        return suffix_matches[0]
-    if len(suffix_matches) > 1:
-        raise SystemExit(
-            "Multiple task_id-like observation keys were found. Please pass --task-id-key explicitly: "
-            f"{suffix_matches}"
-        )
+    if prefixed_keys:
+        return prefixed_keys
 
-    return None
+    fallback_keys = [
+        key
+        for key in ("observation.task_id", "task_id")
+        if key in dataset_features or (sample_keys is not None and key in sample_keys)
+    ]
+    return fallback_keys
+
+
+def resolve_component_keys(
+    policy_features: dict[str, PolicyFeature],
+    preferred_keys: list[str],
+    aggregate_key: str | None = None,
+) -> tuple[list[str], str]:
+    if all(key in policy_features for key in preferred_keys):
+        return preferred_keys, preferred_keys[0].rsplit(".", 2)[0]
+
+    if aggregate_key is not None and aggregate_key in policy_features:
+        return [aggregate_key], aggregate_key
+
+    return [], ""
 
 
 def build_policy_features(
     dataset_features: dict[str, dict],
     keep_cameras: set[str] | None,
-    task_id_key: str | None,
+    task_id_keys: list[str],
     sample: dict[str, Any] | None = None,
-) -> tuple[dict[str, PolicyFeature], dict[str, PolicyFeature], dict[str, str], list[str], str]:
+) -> tuple[
+    dict[str, PolicyFeature],
+    dict[str, PolicyFeature],
+    dict[str, str],
+    list[str],
+    str,
+    list[str],
+    list[str],
+]:
     policy_features = dataset_to_policy_features(dataset_features)
-    action_source = ACTION
-    state_offset_source = None
-    if AIC_ACTION_OFFSET_KEY in policy_features:
-        policy_features[ACTION] = PolicyFeature(
-            type=FeatureType.ACTION,
-            shape=policy_features[AIC_ACTION_OFFSET_KEY].shape,
-        )
-        action_source = f"{AIC_ACTION_OFFSET_KEY} -> {ACTION}"
+    action_keys, action_source = resolve_component_keys(
+        policy_features,
+        preferred_keys=AIC_ACTION_OFFSET_COMPONENT_KEYS,
+        aggregate_key=AIC_ACTION_OFFSET_KEY,
+    )
+    if action_keys:
+        action_dim = sum(policy_features[key].shape[0] for key in action_keys)
+        policy_features[ACTION] = PolicyFeature(type=FeatureType.ACTION, shape=(action_dim,))
+        action_source_label = f"{action_source} -> {ACTION}"
     elif ACTION not in policy_features:
         if (
             AIC_ACTION_POSITION_KEY in policy_features
@@ -334,22 +368,51 @@ def build_policy_features(
                 type=FeatureType.ACTION,
                 shape=(total_action_dim,),
             )
-            action_source = f"{AIC_ACTION_POSITION_KEY} + {AIC_ACTION_ORIENTATION_KEY} -> {ACTION}"
+            action_source_label = f"{AIC_ACTION_POSITION_KEY} + {AIC_ACTION_ORIENTATION_KEY} -> {ACTION}"
         else:
             raise SystemExit(
                 f"The dataset does not expose a top-level '{ACTION}' feature, and the expected raw AIC "
-                f"action fields ({AIC_ACTION_OFFSET_KEY}) or ({AIC_ACTION_POSITION_KEY}, "
+                f"action fields ({AIC_ACTION_OFFSET_KEY}), ({', '.join(AIC_ACTION_OFFSET_COMPONENT_KEYS)}) or ({AIC_ACTION_POSITION_KEY}, "
                 f"{AIC_ACTION_ORIENTATION_KEY}) were not found."
             )
-    if AIC_ACTION_OFFSET_KEY in policy_features:
-        state_offset_source = AIC_ACTION_OFFSET_KEY
-    elif AIC_OBS_TCP_OFFSET_KEY in policy_features:
-        state_offset_source = AIC_OBS_TCP_OFFSET_KEY
     else:
+        action_source_label = ACTION
+
+    tcp_offset_input_keys, tcp_offset_source = resolve_component_keys(
+        policy_features,
+        preferred_keys=AIC_OBS_TCP_OFFSET_COMPONENT_KEYS,
+        aggregate_key=AIC_OBS_TCP_OFFSET_KEY,
+    )
+    if not tcp_offset_input_keys and all(key in policy_features for key in AIC_ACTION_OFFSET_COMPONENT_KEYS):
+        tcp_offset_input_keys = AIC_ACTION_OFFSET_COMPONENT_KEYS
+        tcp_offset_source = "action.tcp_offset.*"
+    elif not tcp_offset_input_keys and AIC_ACTION_OFFSET_KEY in policy_features:
+        tcp_offset_input_keys = [AIC_ACTION_OFFSET_KEY]
+        tcp_offset_source = AIC_ACTION_OFFSET_KEY
+
+    if not tcp_offset_input_keys:
         raise SystemExit(
-            "The dataset does not expose a tcp_offset feature that can be used to build "
-            f"the ACT observation state. Expected one of: {AIC_ACTION_OFFSET_KEY}, {AIC_OBS_TCP_OFFSET_KEY}."
+            "The dataset does not expose tcp_offset features that can be used to build observation.state. "
+            f"Expected one of: {AIC_OBS_TCP_OFFSET_KEY}, {AIC_ACTION_OFFSET_KEY}, "
+            f"{AIC_OBS_TCP_OFFSET_COMPONENT_KEYS}, {AIC_ACTION_OFFSET_COMPONENT_KEYS}."
         )
+
+    tcp_offset_dim = sum(policy_features[key].shape[0] for key in tcp_offset_input_keys)
+
+    if not task_id_keys:
+        raise SystemExit(
+            "A task_id-like key is required to build observation.state as [task_id ; tcp_offset]. "
+            "Please pass --task-id-key explicitly if auto-detection failed."
+        )
+
+    task_id_features: dict[str, PolicyFeature] = {}
+    for key in task_id_keys:
+        if key in policy_features:
+            task_id_features[key] = PolicyFeature(type=FeatureType.STATE, shape=policy_features[key].shape)
+        else:
+            if sample is None or key not in sample:
+                raise SystemExit(f"Resolved task-id key '{key}' is not part of the dataset features or sample.")
+            task_id_features[key] = PolicyFeature(type=FeatureType.STATE, shape=infer_feature_shape(sample[key]))
 
     available_cameras = sorted(
         key for key, feature in policy_features.items() if feature.type is FeatureType.VISUAL
@@ -369,33 +432,26 @@ def build_policy_features(
         if feature.type is FeatureType.VISUAL and (keep_cameras is None or key in keep_cameras)
     }
 
-    tcp_feature = policy_features[state_offset_source]
-    if task_id_key is None:
-        raise SystemExit(
-            "A task_id-like key is required to build observation.state as [task_id ; tcp_offset]. "
-            "Please pass --task-id-key explicitly if auto-detection failed."
-        )
-
-    if task_id_key in policy_features:
-        task_feature = policy_features[task_id_key]
-    else:
-        if sample is None or task_id_key not in sample:
-            raise SystemExit(f"Resolved task-id key '{task_id_key}' is not part of the dataset features or sample.")
-        task_feature = PolicyFeature(type=FeatureType.STATE, shape=infer_feature_shape(sample[task_id_key]))
+    for key in task_id_keys:
+        input_features[key] = task_id_features[key]
+    for key in tcp_offset_input_keys:
+        input_features[key] = PolicyFeature(type=FeatureType.STATE, shape=policy_features[key].shape)
 
     input_features[OBS_STATE] = PolicyFeature(
         type=FeatureType.STATE,
-        shape=(task_feature.shape[0] + tcp_feature.shape[0],),
+        shape=(sum(feature.shape[0] for feature in task_id_features.values()) + tcp_offset_dim,),
     )
-    input_features[AIC_TASK_ID_INPUT_KEY] = PolicyFeature(type=FeatureType.STATE, shape=task_feature.shape)
-    input_features[AIC_TCP_OFFSET_INPUT_KEY] = PolicyFeature(type=FeatureType.STATE, shape=tcp_feature.shape)
 
-    rename_map: dict[str, str] = {
-        task_id_key: AIC_TASK_ID_INPUT_KEY,
-        state_offset_source: AIC_TCP_OFFSET_INPUT_KEY,
-    }
-
-    return input_features, output_features, rename_map, available_cameras, action_source
+    rename_map: dict[str, str] = {}
+    return (
+        input_features,
+        output_features,
+        rename_map,
+        available_cameras,
+        action_source_label,
+        task_id_keys,
+        tcp_offset_input_keys,
+    )
 
 
 def write_train_config(config: TrainPipelineConfig, config_path: Path) -> None:
@@ -493,7 +549,8 @@ def main() -> int:
     keep_cameras = parse_keep_cameras(args.keep_cameras)
     probe_sample = None
     if args.task_id_key != "none" and (
-        args.task_id_key == "auto" or args.task_id_key not in dataset_meta.features
+        args.task_id_key == "auto"
+        or any(key.strip() not in dataset_meta.features for key in args.task_id_key.split(",") if key.strip())
     ):
         probe_sample = load_probe_sample(
             args.dataset_repo_id,
@@ -501,15 +558,23 @@ def main() -> int:
             revision=args.revision,
         )
 
-    task_id_key = resolve_task_id_key(
+    task_id_keys = resolve_task_id_keys(
         dataset_meta.features,
         args.task_id_key,
         sample_keys=set(probe_sample) if probe_sample is not None else None,
     )
-    input_features, output_features, rename_map, available_cameras, action_source = build_policy_features(
+    (
+        input_features,
+        output_features,
+        rename_map,
+        available_cameras,
+        action_source,
+        resolved_task_id_keys,
+        tcp_offset_input_keys,
+    ) = build_policy_features(
         dataset_meta.features,
         keep_cameras=keep_cameras,
-        task_id_key=task_id_key,
+        task_id_keys=task_id_keys,
         sample=probe_sample,
     )
     cfg, config_path = build_train_config(args, input_features, output_features, rename_map)
@@ -519,9 +584,11 @@ def main() -> int:
     print(f"Generated train config: {config_path}")
     print(f"Dataset repo: {args.dataset_repo_id}")
     print(f"Action source: {action_source}")
+    print(f"Observation tcp_offset keys: {tcp_offset_input_keys}")
     print(f"Available cameras: {available_cameras}")
     print(f"Selected cameras: {selected_cameras}")
-    print(f"Task-id source: {task_id_key} -> {rename_map[task_id_key]} (kept unnormalized inside observation.state)")
+    print(f"Task-id source keys: {resolved_task_id_keys}")
+    print("Observation state: [unnormalized task_id keys ; normalized tcp_offset keys]")
 
     if args.check_only:
         return 0

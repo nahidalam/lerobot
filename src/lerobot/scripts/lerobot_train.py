@@ -61,6 +61,14 @@ from lerobot.utils.constants import ACTION
 
 AIC_OBS_TCP_OFFSET_KEY = "observation.tcp_offset"
 AIC_ACTION_OFFSET_KEY = "action.tcp_offset"
+AIC_ACTION_OFFSET_COMPONENT_KEYS = [
+    "action.tcp_offset.linear.x",
+    "action.tcp_offset.linear.y",
+    "action.tcp_offset.linear.z",
+    "action.tcp_offset.angular.x",
+    "action.tcp_offset.angular.y",
+    "action.tcp_offset.angular.z",
+]
 AIC_ACTION_POSITION_KEY = "action.tcp.position"
 AIC_ACTION_ORIENTATION_KEY = "action.tcp.orientation"
 AIC_TASK_ID_INPUT_KEY = "observation.aic_task_id"
@@ -72,6 +80,28 @@ def _maybe_add_combined_action_stats(
 ) -> dict[str, dict[str, Any]] | None:
     if not stats or ACTION in stats:
         return stats
+
+    if all(key in stats for key in AIC_ACTION_OFFSET_COMPONENT_KEYS):
+        shared_stat_keys = [
+            key
+            for key in ("mean", "std", "min", "max", "q01", "q10", "q90", "q99")
+            if all(key in stats[action_key] for action_key in AIC_ACTION_OFFSET_COMPONENT_KEYS)
+        ]
+        if not shared_stat_keys:
+            return stats
+
+        merged_stats = dict(stats)
+        merged_stats[ACTION] = {
+            key: torch.cat(
+                [
+                    torch.as_tensor(stats[action_key][key], dtype=torch.float32).reshape(-1)
+                    for action_key in AIC_ACTION_OFFSET_COMPONENT_KEYS
+                ],
+                dim=-1,
+            )
+            for key in shared_stat_keys
+        }
+        return merged_stats
 
     if AIC_ACTION_OFFSET_KEY in stats:
         offset_stats = stats[AIC_ACTION_OFFSET_KEY]

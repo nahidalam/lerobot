@@ -36,9 +36,6 @@ from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PR
 
 from .configuration_act import ACTConfig
 
-AIC_TASK_ID_INPUT_KEY = "observation.aic_task_id"
-AIC_TCP_OFFSET_INPUT_KEY = "observation.aic_tcp_offset"
-
 
 def make_act_pre_post_processors(
     config: ACTConfig,
@@ -66,15 +63,18 @@ def make_act_pre_post_processors(
     normalize_observation_keys = None
     concat_step = None
 
-    if (
-        OBS_STATE in (config.input_features or {})
-        and AIC_TASK_ID_INPUT_KEY in (config.input_features or {})
-        and AIC_TCP_OFFSET_INPUT_KEY in (config.input_features or {})
-    ):
-        cast_keys = [*cast_keys, AIC_TASK_ID_INPUT_KEY]
-        normalize_observation_keys = set(config.image_features) | {AIC_TCP_OFFSET_INPUT_KEY}
+    task_id_source_keys = sorted(
+        key for key in (config.input_features or {}) if key.startswith("observation.task_id.")
+    )
+    tcp_offset_source_keys = sorted(
+        key for key in (config.input_features or {}) if key.startswith("observation.tcp_offset.")
+    )
+
+    if OBS_STATE in (config.input_features or {}) and task_id_source_keys and tcp_offset_source_keys:
+        cast_keys = [*cast_keys, *task_id_source_keys, *tcp_offset_source_keys]
+        normalize_observation_keys = set(config.image_features) | set(tcp_offset_source_keys)
         concat_step = ConcatObservationKeysProcessorStep(
-            source_keys=[AIC_TASK_ID_INPUT_KEY, AIC_TCP_OFFSET_INPUT_KEY],
+            source_keys=[*task_id_source_keys, *tcp_offset_source_keys],
             output_key=OBS_STATE,
             drop_source_keys=True,
         )

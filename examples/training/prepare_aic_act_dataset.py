@@ -59,6 +59,14 @@ DEFAULT_KEEP_CAMERAS = ",".join(
 )
 
 ACTION_OFFSET_KEY = "action.tcp_offset"
+ACTION_OFFSET_COMPONENT_KEYS = [
+    "action.tcp_offset.linear.x",
+    "action.tcp_offset.linear.y",
+    "action.tcp_offset.linear.z",
+    "action.tcp_offset.angular.x",
+    "action.tcp_offset.angular.y",
+    "action.tcp_offset.angular.z",
+]
 ACTION_POSITION_KEY = "action.tcp.position"
 ACTION_ORIENTATION_KEY = "action.tcp.orientation"
 COMBINED_ACTION_KEY = "action"
@@ -115,6 +123,9 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_action_source(dataset: LeRobotDataset) -> tuple[str, tuple[int, ...], list[str]]:
     features = dataset.meta.features
+    if all(key in features for key in ACTION_OFFSET_COMPONENT_KEYS):
+        return ("tcp_offset_components", (len(ACTION_OFFSET_COMPONENT_KEYS),), ACTION_OFFSET_COMPONENT_KEYS)
+
     if ACTION_OFFSET_KEY in features:
         source_feature = features[ACTION_OFFSET_KEY]
         return (
@@ -145,6 +156,9 @@ def make_combined_action(
     _frame_in_ep: int,
     action_source: str,
 ) -> np.ndarray:
+    if action_source == "tcp_offset_components":
+        return np.asarray([row[key] for key in ACTION_OFFSET_COMPONENT_KEYS], dtype=np.float32)
+
     if action_source == ACTION_OFFSET_KEY:
         return np.asarray(row[ACTION_OFFSET_KEY], dtype=np.float32)
 
@@ -155,7 +169,9 @@ def make_combined_action(
 
 def compute_combined_action_stats(dataset: LeRobotDataset, action_source: str) -> dict[str, list[float]]:
     hf_dataset = dataset.hf_dataset.with_format(None)
-    if action_source == ACTION_OFFSET_KEY:
+    if action_source == "tcp_offset_components":
+        actions = np.stack([np.asarray(hf_dataset[key], dtype=np.float32) for key in ACTION_OFFSET_COMPONENT_KEYS], axis=1)
+    elif action_source == ACTION_OFFSET_KEY:
         actions = np.asarray(hf_dataset[ACTION_OFFSET_KEY], dtype=np.float32)
     else:
         positions = np.asarray(hf_dataset[ACTION_POSITION_KEY], dtype=np.float32)

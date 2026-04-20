@@ -28,6 +28,15 @@ from lerobot.utils.constants import ACTION, DONE, INFO, OBS_PREFIX, REWARD, TRUN
 
 AIC_ACTION_OFFSET_KEY = "action.tcp_offset"
 AIC_ACTION_OFFSET_PAD_KEY = f"{AIC_ACTION_OFFSET_KEY}_is_pad"
+AIC_ACTION_OFFSET_COMPONENT_KEYS = [
+    "action.tcp_offset.linear.x",
+    "action.tcp_offset.linear.y",
+    "action.tcp_offset.linear.z",
+    "action.tcp_offset.angular.x",
+    "action.tcp_offset.angular.y",
+    "action.tcp_offset.angular.z",
+]
+AIC_ACTION_OFFSET_COMPONENT_PAD_KEYS = [f"{key}_is_pad" for key in AIC_ACTION_OFFSET_COMPONENT_KEYS]
 AIC_ACTION_POSITION_KEY = "action.tcp.position"
 AIC_ACTION_ORIENTATION_KEY = "action.tcp.orientation"
 AIC_ACTION_POSITION_PAD_KEY = f"{AIC_ACTION_POSITION_KEY}_is_pad"
@@ -43,6 +52,12 @@ def _extract_policy_action(batch: dict[str, Any]) -> PolicyAction | None:
 
     if AIC_ACTION_OFFSET_KEY in batch:
         return batch[AIC_ACTION_OFFSET_KEY]
+
+    if all(key in batch for key in AIC_ACTION_OFFSET_COMPONENT_KEYS):
+        return torch.cat(
+            [torch.as_tensor(batch[key]).unsqueeze(-1) for key in AIC_ACTION_OFFSET_COMPONENT_KEYS],
+            dim=-1,
+        )
 
     if AIC_ACTION_POSITION_KEY in batch and AIC_ACTION_ORIENTATION_KEY in batch:
         return torch.cat([batch[AIC_ACTION_POSITION_KEY], batch[AIC_ACTION_ORIENTATION_KEY]], dim=-1)
@@ -192,6 +207,8 @@ def _extract_complementary_data(batch: dict[str, Any]) -> dict[str, Any]:
     if "action_is_pad" not in pad_keys:
         if AIC_ACTION_OFFSET_PAD_KEY in batch:
             pad_keys["action_is_pad"] = batch[AIC_ACTION_OFFSET_PAD_KEY]
+        elif all(key in batch for key in AIC_ACTION_OFFSET_COMPONENT_PAD_KEYS):
+            pad_keys["action_is_pad"] = batch[AIC_ACTION_OFFSET_COMPONENT_PAD_KEYS[0]]
         elif AIC_ACTION_POSITION_PAD_KEY in batch and AIC_ACTION_ORIENTATION_PAD_KEY in batch:
             pad_keys["action_is_pad"] = batch[AIC_ACTION_POSITION_PAD_KEY]
     task_key = {"task": batch["task"]} if "task" in batch else {}
@@ -377,8 +394,6 @@ def batch_to_transition(batch: dict[str, Any]) -> EnvTransition:
 
     # Extract observation and complementary data keys.
     observation_keys = {k: v for k, v in batch.items() if k.startswith(OBS_PREFIX)}
-    if AIC_ACTION_OFFSET_KEY in batch and AIC_ACTION_OFFSET_KEY not in observation_keys:
-        observation_keys[AIC_ACTION_OFFSET_KEY] = batch[AIC_ACTION_OFFSET_KEY]
     if "task_id" in batch and "task_id" not in observation_keys:
         observation_keys["task_id"] = batch["task_id"]
     complementary_data = _extract_complementary_data(batch)
