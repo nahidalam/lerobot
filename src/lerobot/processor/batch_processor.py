@@ -100,12 +100,13 @@ class AddBatchDimensionObservationStep(ObservationProcessorStep):
         Returns:
             The observation dictionary with batch dimensions added to tensors.
         """
-        # Process state observations - add batch dim if 1D
-        for state_key in [OBS_STATE, OBS_ENV_STATE]:
-            if state_key in observation:
-                state_value = observation[state_key]
-                if isinstance(state_value, Tensor) and state_value.dim() == 1:
-                    observation[state_key] = state_value.unsqueeze(0)
+        # Add batch dimension to any 1D tensor observation.
+        for key, value in observation.items():
+            if isinstance(value, Tensor):
+                if value.dim() == 0:
+                    observation[key] = value.reshape(1, 1)
+                elif value.dim() == 1:
+                    observation[key] = value.unsqueeze(0)
 
         # Process single image observation - add batch dim if 3D
         if OBS_IMAGE in observation:

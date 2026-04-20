@@ -43,17 +43,20 @@ from lerobot.configs import DatasetConfig, FeatureType, NormalizationMode, Polic
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.policies.act import ACTConfig
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE
+from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_STATE
 from lerobot.utils.feature_utils import dataset_to_policy_features
 
 DEFAULT_DATASET_REPO_ID = "slobot/aic"
-DEFAULT_KEEP_CAMERAS = "observation.images.center_camera"
+DEFAULT_KEEP_CAMERAS = "all"
 DEFAULT_TASK_ID_KEY = "auto"
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_DIR = ROOT_DIR / "outputs" / "generated_configs"
+AIC_OBS_TCP_OFFSET_KEY = "observation.tcp_offset"
 AIC_ACTION_OFFSET_KEY = "action.tcp_offset"
 AIC_ACTION_POSITION_KEY = "action.tcp.position"
 AIC_ACTION_ORIENTATION_KEY = "action.tcp.orientation"
+AIC_TASK_ID_INPUT_KEY = "observation.aic_task_id"
+AIC_TCP_OFFSET_INPUT_KEY = "observation.aic_tcp_offset"
 
 
 def load_probe_sample(
@@ -311,14 +314,15 @@ def build_policy_features(
 ) -> tuple[dict[str, PolicyFeature], dict[str, PolicyFeature], dict[str, str], list[str], str]:
     policy_features = dataset_to_policy_features(dataset_features)
     action_source = ACTION
-    if ACTION not in policy_features:
-        if AIC_ACTION_OFFSET_KEY in policy_features:
-            policy_features[ACTION] = PolicyFeature(
-                type=FeatureType.ACTION,
-                shape=policy_features[AIC_ACTION_OFFSET_KEY].shape,
-            )
-            action_source = f"{AIC_ACTION_OFFSET_KEY} -> {ACTION}"
-        elif (
+    state_offset_source = None
+    if AIC_ACTION_OFFSET_KEY in policy_features:
+        policy_features[ACTION] = PolicyFeature(
+            type=FeatureType.ACTION,
+            shape=policy_features[AIC_ACTION_OFFSET_KEY].shape,
+        )
+        action_source = f"{AIC_ACTION_OFFSET_KEY} -> {ACTION}"
+    elif ACTION not in policy_features:
+        if (
             AIC_ACTION_POSITION_KEY in policy_features
             and AIC_ACTION_ORIENTATION_KEY in policy_features
         ):
@@ -337,6 +341,15 @@ def build_policy_features(
                 f"action fields ({AIC_ACTION_OFFSET_KEY}) or ({AIC_ACTION_POSITION_KEY}, "
                 f"{AIC_ACTION_ORIENTATION_KEY}) were not found."
             )
+    if AIC_ACTION_OFFSET_KEY in policy_features:
+        state_offset_source = AIC_ACTION_OFFSET_KEY
+    elif AIC_OBS_TCP_OFFSET_KEY in policy_features:
+        state_offset_source = AIC_OBS_TCP_OFFSET_KEY
+    else:
+        raise SystemExit(
+            "The dataset does not expose a tcp_offset feature that can be used to build "
+            f"the ACT observation state. Expected one of: {AIC_ACTION_OFFSET_KEY}, {AIC_OBS_TCP_OFFSET_KEY}."
+        )
 
     available_cameras = sorted(
         key for key, feature in policy_features.items() if feature.type is FeatureType.VISUAL
@@ -350,38 +363,37 @@ def build_policy_features(
             )
 
     output_features = {ACTION: policy_features[ACTION]}
-    input_features: dict[str, PolicyFeature] = {}
-    for key, feature in policy_features.items():
-        if feature.type is FeatureType.ACTION:
-            continue
-        if feature.type is FeatureType.VISUAL and keep_cameras is not None and key not in keep_cameras:
-            continue
-        input_features[key] = feature
+    input_features: dict[str, PolicyFeature] = {
+        key: feature
+        for key, feature in policy_features.items()
+        if feature.type is FeatureType.VISUAL and (keep_cameras is None or key in keep_cameras)
+    }
 
-    rename_map: dict[str, str] = {}
-    if task_id_key is not None:
-        if task_id_key != OBS_ENV_STATE and OBS_ENV_STATE in input_features:
-            raise SystemExit(
-                "Both observation.environment_state and a separate task_id-like key are present. "
-                f"Please pass --task-id-key explicitly. Found task-id candidate: '{task_id_key}'."
-            )
+    tcp_feature = policy_features[state_offset_source]
+    if task_id_key is None:
+        raise SystemExit(
+            "A task_id-like key is required to build observation.state as [task_id ; tcp_offset]. "
+            "Please pass --task-id-key explicitly if auto-detection failed."
+        )
 
-        if task_id_key == OBS_ENV_STATE:
-            env_feature = input_features[OBS_ENV_STATE]
-        else:
-            env_feature = input_features.pop(task_id_key, None)
-            if env_feature is None:
-                if sample is None or task_id_key not in sample:
-                    raise SystemExit(
-                        f"Resolved task-id key '{task_id_key}' is not part of the ACT input features."
-                    )
-                env_feature = PolicyFeature(
-                    type=FeatureType.ENV,
-                    shape=infer_feature_shape(sample[task_id_key]),
-                )
-            rename_map[task_id_key] = OBS_ENV_STATE
+    if task_id_key in policy_features:
+        task_feature = policy_features[task_id_key]
+    else:
+        if sample is None or task_id_key not in sample:
+            raise SystemExit(f"Resolved task-id key '{task_id_key}' is not part of the dataset features or sample.")
+        task_feature = PolicyFeature(type=FeatureType.STATE, shape=infer_feature_shape(sample[task_id_key]))
 
-        input_features[OBS_ENV_STATE] = PolicyFeature(type=FeatureType.ENV, shape=env_feature.shape)
+    input_features[OBS_STATE] = PolicyFeature(
+        type=FeatureType.STATE,
+        shape=(task_feature.shape[0] + tcp_feature.shape[0],),
+    )
+    input_features[AIC_TASK_ID_INPUT_KEY] = PolicyFeature(type=FeatureType.STATE, shape=task_feature.shape)
+    input_features[AIC_TCP_OFFSET_INPUT_KEY] = PolicyFeature(type=FeatureType.STATE, shape=tcp_feature.shape)
+
+    rename_map: dict[str, str] = {
+        task_id_key: AIC_TASK_ID_INPUT_KEY,
+        state_offset_source: AIC_TCP_OFFSET_INPUT_KEY,
+    }
 
     return input_features, output_features, rename_map, available_cameras, action_source
 
@@ -410,7 +422,6 @@ def build_train_config(
         FeatureType.VISUAL: NormalizationMode.MEAN_STD,
         FeatureType.STATE: NormalizationMode.MEAN_STD,
         FeatureType.ACTION: NormalizationMode.MEAN_STD,
-        FeatureType.ENV: NormalizationMode.IDENTITY,
     }
 
     policy_kwargs: dict[str, object] = {
@@ -510,11 +521,7 @@ def main() -> int:
     print(f"Action source: {action_source}")
     print(f"Available cameras: {available_cameras}")
     print(f"Selected cameras: {selected_cameras}")
-    if task_id_key is None:
-        print("Task-id passthrough: disabled (no task_id-like observation key selected)")
-    else:
-        mapped_key = rename_map.get(task_id_key, task_id_key)
-        print(f"Task-id passthrough: {task_id_key} -> {mapped_key} (identity normalization)")
+    print(f"Task-id source: {task_id_key} -> {rename_map[task_id_key]} (kept unnormalized inside observation.state)")
 
     if args.check_only:
         return 0

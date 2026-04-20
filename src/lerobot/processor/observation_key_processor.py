@@ -19,7 +19,7 @@ from typing import Any
 
 import torch
 
-from lerobot.configs import PipelineFeatureType, PolicyFeature
+from lerobot.configs import FeatureType, PipelineFeatureType, PolicyFeature
 
 from .pipeline import ObservationProcessorStep, ProcessorStepRegistry
 
@@ -88,3 +88,65 @@ class CastObservationKeysProcessorStep(ObservationProcessorStep):
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         return features
+
+
+@dataclass
+@ProcessorStepRegistry.register(name="concat_observation_keys_processor")
+class ConcatObservationKeysProcessorStep(ObservationProcessorStep):
+    """Concatenate selected observation keys into a single output key."""
+
+    source_keys: list[str] = field(default_factory=list)
+    output_key: str = ""
+    drop_source_keys: bool = True
+
+    def _to_concat_tensor(self, value: Any) -> torch.Tensor:
+        tensor = torch.as_tensor(value)
+        if tensor.ndim == 0:
+            return tensor.reshape(1)
+        return tensor
+
+    def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+        if not self.output_key or not self.source_keys:
+            return observation
+        if any(key not in observation for key in self.source_keys):
+            return observation
+
+        new_observation = dict(observation)
+        tensors = [self._to_concat_tensor(new_observation[key]) for key in self.source_keys]
+        new_observation[self.output_key] = torch.cat(tensors, dim=-1)
+
+        if self.drop_source_keys:
+            for key in self.source_keys:
+                new_observation.pop(key, None)
+
+        return new_observation
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            "source_keys": self.source_keys,
+            "output_key": self.output_key,
+            "drop_source_keys": self.drop_source_keys,
+        }
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        new_features = features.copy()
+        observation_features = dict(features[PipelineFeatureType.OBSERVATION])
+
+        if not self.output_key or any(key not in observation_features for key in self.source_keys):
+            new_features[PipelineFeatureType.OBSERVATION] = observation_features
+            return new_features
+
+        total_dim = sum(observation_features[key].shape[0] for key in self.source_keys)
+        observation_features[self.output_key] = PolicyFeature(
+            type=FeatureType.STATE,
+            shape=(total_dim,),
+        )
+
+        if self.drop_source_keys:
+            for key in self.source_keys:
+                observation_features.pop(key, None)
+
+        new_features[PipelineFeatureType.OBSERVATION] = observation_features
+        return new_features

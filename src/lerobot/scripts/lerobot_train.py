@@ -59,9 +59,12 @@ from lerobot.utils.utils import (
 )
 from lerobot.utils.constants import ACTION
 
+AIC_OBS_TCP_OFFSET_KEY = "observation.tcp_offset"
 AIC_ACTION_OFFSET_KEY = "action.tcp_offset"
 AIC_ACTION_POSITION_KEY = "action.tcp.position"
 AIC_ACTION_ORIENTATION_KEY = "action.tcp.orientation"
+AIC_TASK_ID_INPUT_KEY = "observation.aic_task_id"
+AIC_TCP_OFFSET_INPUT_KEY = "observation.aic_tcp_offset"
 
 
 def _maybe_add_combined_action_stats(
@@ -108,6 +111,22 @@ def _maybe_add_combined_action_stats(
         )
         for key in shared_stat_keys
     }
+    return merged_stats
+
+
+def _maybe_add_renamed_stats(
+    stats: dict[str, dict[str, Any]] | None,
+    rename_map: dict[str, str] | None,
+) -> dict[str, dict[str, Any]] | None:
+    if not stats or not rename_map:
+        return stats
+
+    merged_stats = dict(stats)
+    for source_key, dest_key in rename_map.items():
+        if source_key in stats and dest_key not in merged_stats:
+            merged_stats[dest_key] = {
+                key: torch.as_tensor(value, dtype=torch.float32) for key, value in stats[source_key].items()
+            }
     return merged_stats
 
 from .lerobot_eval import eval_policy_all
@@ -290,6 +309,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         dataset = make_dataset(cfg)
 
     dataset.meta.stats = _maybe_add_combined_action_stats(dataset.meta.stats)
+    dataset.meta.stats = _maybe_add_renamed_stats(dataset.meta.stats, cfg.rename_map)
 
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,

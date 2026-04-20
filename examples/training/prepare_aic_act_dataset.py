@@ -50,7 +50,13 @@ DEFAULT_SOURCE_REPO_ID = "slobot/aic"
 DEFAULT_PREPARED_REPO_ID = "slobot/aic_act"
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "outputs" / "datasets" / "act_ready_slobot_aic"
-DEFAULT_KEEP_CAMERAS = "observation.images.center_camera"
+DEFAULT_KEEP_CAMERAS = ",".join(
+    [
+        "observation.images.center_camera",
+        "observation.images.left_camera",
+        "observation.images.right_camera",
+    ]
+)
 
 ACTION_OFFSET_KEY = "action.tcp_offset"
 ACTION_POSITION_KEY = "action.tcp.position"

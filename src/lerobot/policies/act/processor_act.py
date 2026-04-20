@@ -20,6 +20,7 @@ import torch
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
     CastObservationKeysProcessorStep,
+    ConcatObservationKeysProcessorStep,
     DeviceProcessorStep,
     NormalizerProcessorStep,
     PolicyAction,
@@ -30,10 +31,13 @@ from lerobot.processor import (
     policy_action_to_transition,
     transition_to_policy_action,
 )
-from lerobot.utils.constants import OBS_ENV_STATE
+from lerobot.utils.constants import OBS_ENV_STATE, OBS_STATE
 from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
 
 from .configuration_act import ACTConfig
+
+AIC_TASK_ID_INPUT_KEY = "observation.aic_task_id"
+AIC_TCP_OFFSET_INPUT_KEY = "observation.aic_tcp_offset"
 
 
 def make_act_pre_post_processors(
@@ -58,13 +62,27 @@ def make_act_pre_post_processors(
         tuple[PolicyProcessorPipeline[dict[str, Any], dict[str, Any]], PolicyProcessorPipeline[PolicyAction, PolicyAction]]: A tuple containing the
         pre-processor pipeline and the post-processor pipeline.
     """
+    cast_keys = [OBS_ENV_STATE] if config.env_state_feature is not None else []
+    normalize_observation_keys = None
+    concat_step = None
+
+    if (
+        OBS_STATE in (config.input_features or {})
+        and AIC_TASK_ID_INPUT_KEY in (config.input_features or {})
+        and AIC_TCP_OFFSET_INPUT_KEY in (config.input_features or {})
+    ):
+        cast_keys = [*cast_keys, AIC_TASK_ID_INPUT_KEY]
+        normalize_observation_keys = set(config.image_features) | {AIC_TCP_OFFSET_INPUT_KEY}
+        concat_step = ConcatObservationKeysProcessorStep(
+            source_keys=[AIC_TASK_ID_INPUT_KEY, AIC_TCP_OFFSET_INPUT_KEY],
+            output_key=OBS_STATE,
+            drop_source_keys=True,
+        )
 
     input_steps = [
         RenameObservationsProcessorStep(rename_map=rename_map or {}),
         SelectObservationKeysProcessorStep(keep_keys=sorted(config.input_features or {})),
-        CastObservationKeysProcessorStep(
-            cast_keys=[OBS_ENV_STATE] if config.env_state_feature is not None else []
-        ),
+        CastObservationKeysProcessorStep(cast_keys=cast_keys),
         AddBatchDimensionProcessorStep(),
         DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(
@@ -72,8 +90,11 @@ def make_act_pre_post_processors(
             norm_map=config.normalization_mapping,
             stats=dataset_stats,
             device=config.device,
+            normalize_observation_keys=normalize_observation_keys,
         ),
     ]
+    if concat_step is not None:
+        input_steps.append(concat_step)
     output_steps = [
         UnnormalizerProcessorStep(
             features=config.output_features, norm_map=config.normalization_mapping, stats=dataset_stats

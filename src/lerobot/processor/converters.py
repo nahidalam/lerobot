@@ -377,6 +377,8 @@ def batch_to_transition(batch: dict[str, Any]) -> EnvTransition:
 
     # Extract observation and complementary data keys.
     observation_keys = {k: v for k, v in batch.items() if k.startswith(OBS_PREFIX)}
+    if AIC_ACTION_OFFSET_KEY in batch and AIC_ACTION_OFFSET_KEY not in observation_keys:
+        observation_keys[AIC_ACTION_OFFSET_KEY] = batch[AIC_ACTION_OFFSET_KEY]
     if "task_id" in batch and "task_id" not in observation_keys:
         observation_keys["task_id"] = batch["task_id"]
     complementary_data = _extract_complementary_data(batch)
