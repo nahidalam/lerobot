@@ -90,6 +90,18 @@ class AddBatchDimensionObservationStep(ObservationProcessorStep):
     - Dictionaries of multiple images (3D tensors).
     """
 
+    def _is_batched_observation(self, observation: dict[str, Tensor]) -> bool:
+        for key, value in observation.items():
+            if not isinstance(value, Tensor):
+                continue
+            if key == OBS_IMAGE and value.dim() == 4:
+                return True
+            if key.startswith(f"{OBS_IMAGES}.") and value.dim() == 4:
+                return True
+            if not key.startswith(f"{OBS_IMAGES}.") and key != OBS_IMAGE and value.dim() > 1:
+                return True
+        return False
+
     def observation(self, observation: dict[str, Tensor]) -> dict[str, Tensor]:
         """
         Adds a batch dimension to tensor-based observations in the observation dictionary.
@@ -100,12 +112,14 @@ class AddBatchDimensionObservationStep(ObservationProcessorStep):
         Returns:
             The observation dictionary with batch dimensions added to tensors.
         """
+        is_batched = self._is_batched_observation(observation)
+
         # Add batch dimension to any 1D tensor observation.
         for key, value in observation.items():
             if isinstance(value, Tensor):
-                if value.dim() == 0:
+                if value.dim() == 0 and not is_batched:
                     observation[key] = value.reshape(1, 1)
-                elif value.dim() == 1:
+                elif value.dim() == 1 and not is_batched:
                     observation[key] = value.unsqueeze(0)
 
         # Process single image observation - add batch dim if 3D
