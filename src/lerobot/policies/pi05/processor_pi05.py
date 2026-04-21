@@ -25,6 +25,8 @@ from lerobot.configs import PipelineFeatureType, PolicyFeature
 from lerobot.processor import (
     AbsoluteActionsProcessorStep,
     AddBatchDimensionProcessorStep,
+    CastObservationKeysProcessorStep,
+    ConcatObservationKeysProcessorStep,
     DeviceProcessorStep,
     NormalizerProcessorStep,
     PolicyAction,
@@ -33,6 +35,7 @@ from lerobot.processor import (
     ProcessorStepRegistry,
     RelativeActionsProcessorStep,
     RenameObservationsProcessorStep,
+    SelectObservationKeysProcessorStep,
     TokenizerProcessorStep,
     UnnormalizerProcessorStep,
     policy_action_to_transition,
@@ -46,6 +49,18 @@ from lerobot.utils.constants import (
 )
 
 from .configuration_pi05 import PI05Config
+
+
+def _resolve_aic_state_sources(config: PI05Config) -> tuple[list[str], list[str]]:
+    input_features = config.input_features or {}
+    if OBS_STATE not in input_features:
+        return [], []
+
+    task_id_source_keys = sorted(key for key in input_features if key.startswith("observation.task_id."))
+    tcp_offset_source_keys = sorted(
+        key for key in input_features if key.startswith("observation.tcp_offset.")
+    )
+    return task_id_source_keys, tcp_offset_source_keys
 
 
 @ProcessorStepRegistry.register(name="pi05_prepare_state_tokenizer_processor_step")
@@ -134,10 +149,24 @@ def make_pi05_pre_post_processors(
         exclude_joints=getattr(config, "relative_exclude_joints", []),
         action_names=getattr(config, "action_feature_names", None),
     )
+    task_id_source_keys, tcp_offset_source_keys = _resolve_aic_state_sources(config)
+    aic_state_source_keys = [*task_id_source_keys, *tcp_offset_source_keys]
+    normalize_observation_keys = None
+    concat_step = None
+
+    if aic_state_source_keys:
+        normalize_observation_keys = set(config.image_features) | set(tcp_offset_source_keys)
+        concat_step = ConcatObservationKeysProcessorStep(
+            source_keys=aic_state_source_keys,
+            output_key=OBS_STATE,
+            drop_source_keys=True,
+        )
 
     # OpenPI order: raw → relative → normalize → model → unnormalize → absolute
     input_steps: list[ProcessorStep] = [
         RenameObservationsProcessorStep(rename_map={}),  # To mimic the same processor as pretrained one
+        SelectObservationKeysProcessorStep(keep_keys=sorted(config.input_features or {})),
+        CastObservationKeysProcessorStep(cast_keys=aic_state_source_keys),
         AddBatchDimensionProcessorStep(),
         relative_step,
         # NOTE: NormalizerProcessorStep MUST come before Pi05PrepareStateTokenizerProcessorStep
@@ -146,16 +175,23 @@ def make_pi05_pre_post_processors(
             features={**config.input_features, **config.output_features},
             norm_map=config.normalization_mapping,
             stats=dataset_stats,
+            normalize_observation_keys=normalize_observation_keys,
         ),
-        Pi05PrepareStateTokenizerProcessorStep(max_state_dim=config.max_state_dim),
-        TokenizerProcessorStep(
-            tokenizer_name="google/paligemma-3b-pt-224",
-            max_length=config.tokenizer_max_length,
-            padding_side="right",
-            padding="max_length",
-        ),
-        DeviceProcessorStep(device=config.device),
     ]
+    if concat_step is not None:
+        input_steps.append(concat_step)
+    input_steps.extend(
+        [
+            Pi05PrepareStateTokenizerProcessorStep(max_state_dim=config.max_state_dim),
+            TokenizerProcessorStep(
+                tokenizer_name="google/paligemma-3b-pt-224",
+                max_length=config.tokenizer_max_length,
+                padding_side="right",
+                padding="max_length",
+            ),
+            DeviceProcessorStep(device=config.device),
+        ]
+    )
 
     output_steps: list[ProcessorStep] = [
         UnnormalizerProcessorStep(

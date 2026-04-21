@@ -57,7 +57,7 @@ from lerobot.utils.utils import (
     init_logging,
     inside_slurm,
 )
-from lerobot.utils.constants import ACTION
+from lerobot.utils.constants import ACTION, OBS_STATE
 
 AIC_OBS_TCP_OFFSET_KEY = "observation.tcp_offset"
 AIC_ACTION_OFFSET_KEY = "action.tcp_offset"
@@ -73,6 +73,18 @@ AIC_ACTION_POSITION_KEY = "action.tcp.position"
 AIC_ACTION_ORIENTATION_KEY = "action.tcp.orientation"
 AIC_TASK_ID_INPUT_KEY = "observation.aic_task_id"
 AIC_TCP_OFFSET_INPUT_KEY = "observation.aic_tcp_offset"
+AIC_TASK_ID_PREFIX = "observation.task_id."
+AIC_OBS_TCP_OFFSET_PREFIX = "observation.tcp_offset."
+
+
+def _needs_current_aic_processors(policy_cfg: Any) -> bool:
+    input_features = getattr(policy_cfg, "input_features", None) or {}
+    return (
+        getattr(policy_cfg, "type", None) == "pi05"
+        and OBS_STATE in input_features
+        and any(key.startswith(AIC_TASK_ID_PREFIX) for key in input_features)
+        and any(key.startswith(AIC_OBS_TCP_OFFSET_PREFIX) for key in input_features)
+    )
 
 
 def _maybe_add_combined_action_stats(
@@ -375,6 +387,13 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         logging.warning(
             "use_relative_actions=true with pretrained processors can skip relative transforms if "
             "the checkpoint processors do not define them. Building processors from current policy config."
+        )
+        processor_pretrained_path = None
+    if _needs_current_aic_processors(cfg.policy) and processor_pretrained_path is not None and not cfg.resume:
+        logging.warning(
+            "AIC Pi0.5 training needs dataset-aware processors to build observation.state from "
+            "task_id and tcp_offset keys. Building processors from the current policy config instead "
+            "of loading pretrained processor JSON."
         )
         processor_pretrained_path = None
 
