@@ -16,13 +16,15 @@
 
 """Launch Pi0.5 finetuning for `slobot/aic`.
 
-The current AIC dataset stores task and tcp-offset features as multiple scalar or
-one-hot columns. This helper generates a Pi0.5 config where:
+Pi0.5 is a VLA policy, so task conditioning comes from the LeRobot dataset's
+natural-language `task` field. This helper generates a Pi0.5 config where:
 
-1. `observation.state` is built by the Pi0.5 preprocessor as
-   `[observation.task_id.* ; normalized observation.tcp_offset.*]`.
-2. The policy action target is synthesized from `action.tcp_offset.*`.
-3. All three AIC cameras are kept by default.
+1. the text instruction is read from `meta/tasks.parquet` through LeRobot's
+   standard `task` field and tokenized by the Pi0.5 preprocessor;
+2. `observation.state` is built by the Pi0.5 preprocessor from normalized
+   `observation.tcp_offset.*` keys by default;
+3. the policy action target is synthesized from `action.tcp_offset.*`;
+4. all three AIC cameras are kept by default.
 """
 
 from __future__ import annotations
@@ -39,7 +41,6 @@ from act_aic_finetune import (
     DEFAULT_CONFIG_DIR,
     DEFAULT_DATASET_REPO_ID,
     DEFAULT_KEEP_CAMERAS,
-    DEFAULT_TASK_ID_KEY,
     ROOT_DIR,
     build_policy_features,
     build_train_command,
@@ -57,6 +58,7 @@ from lerobot.policies.pi05 import PI05Config
 
 DEFAULT_POLICY_PATH = "lerobot/pi05_base"
 DEFAULT_DATASET_REVISION = "main"
+DEFAULT_PI05_TASK_ID_KEY = "none"
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
@@ -87,8 +89,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--task-id-key",
-        default=DEFAULT_TASK_ID_KEY,
-        help="Task-id observation key(s). Use 'auto' to detect observation.task_id.* keys.",
+        default=DEFAULT_PI05_TASK_ID_KEY,
+        help=(
+            "Optional task-id observation key(s) to append to observation.state. "
+            "Pi0.5 uses the dataset's natural-language task instruction by default, so this defaults "
+            "to 'none'. Use 'auto' to also include observation.task_id.* keys."
+        ),
     )
     parser.add_argument(
         "--job-name",
@@ -256,6 +262,7 @@ def main() -> int:
         keep_cameras=keep_cameras,
         task_id_keys=task_id_keys,
         sample=probe_sample,
+        require_task_id=False,
     )
     cfg, config_path = build_train_config(args, input_features, output_features, rename_map)
     write_train_config(cfg, config_path)
@@ -269,8 +276,12 @@ def main() -> int:
     print(f"Observation tcp_offset keys: {tcp_offset_input_keys}")
     print(f"Available cameras: {available_cameras}")
     print(f"Selected cameras: {selected_cameras}")
-    print(f"Task-id source keys: {resolved_task_id_keys}")
-    print("Observation state: [unnormalized task_id keys ; normalized tcp_offset keys]")
+    print("Instruction source: dataset task text from meta/tasks.parquet")
+    print(f"Optional task-id state keys: {resolved_task_id_keys}")
+    if resolved_task_id_keys:
+        print("Observation state: [unnormalized task_id keys ; normalized tcp_offset keys]")
+    else:
+        print("Observation state: [normalized tcp_offset keys]")
 
     if args.check_only:
         return 0

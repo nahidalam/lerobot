@@ -5,8 +5,8 @@ This branch adds a Pi0.5 launcher for finetuning `lerobot/pi05_base` on the AIC 
 The generated training config uses the current `slobot/aic` layout on `main`:
 
 - `action` is synthesized from `action.tcp_offset.linear.*` and `action.tcp_offset.angular.*`.
-- `observation.state` is built in the Pi0.5 preprocessor as `[observation.task_id.* ; observation.tcp_offset.*]`.
-- `observation.task_id.*` is passed through unnormalized.
+- the Pi0.5 language instruction comes from the dataset's standard `task` text in `meta/tasks.parquet`.
+- `observation.state` is built in the Pi0.5 preprocessor from `observation.tcp_offset.*` by default.
 - `observation.tcp_offset.*` is normalized before concatenation.
 - all three camera feeds are kept by default.
 
@@ -36,8 +36,10 @@ The validation should print:
 
 - `Dataset revision: main`
 - all three selected cameras
-- `Task-id source keys: ['observation.task_id...']`
+- `Instruction source: dataset task text from meta/tasks.parquet`
+- `Optional task-id state keys: []`
 - `Observation tcp_offset keys: ['observation.tcp_offset...']`
+- `Observation state: [normalized tcp_offset keys]`
 
 ## Train
 
@@ -62,6 +64,13 @@ Override defaults with environment variables:
 
 ```bash
 BATCH_SIZE=2 STEPS=6000 COMPILE_MODEL=false TRAIN_EXPERT_ONLY=true examples/training/train_pi05_aic.sh
+```
+
+If you explicitly want to append the numeric one-hot task id to the state in addition to the language
+instruction, set `TASK_ID_KEY=auto`:
+
+```bash
+TASK_ID_KEY=auto examples/training/train_pi05_aic.sh
 ```
 
 Use quantile normalization only if the dataset stats include quantiles:

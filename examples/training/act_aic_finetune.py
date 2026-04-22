@@ -336,6 +336,7 @@ def build_policy_features(
     keep_cameras: set[str] | None,
     task_id_keys: list[str],
     sample: dict[str, Any] | None = None,
+    require_task_id: bool = True,
 ) -> tuple[
     dict[str, PolicyFeature],
     dict[str, PolicyFeature],
@@ -399,7 +400,7 @@ def build_policy_features(
 
     tcp_offset_dim = sum(policy_features[key].shape[0] for key in tcp_offset_input_keys)
 
-    if not task_id_keys:
+    if require_task_id and not task_id_keys:
         raise SystemExit(
             "A task_id-like key is required to build observation.state as [task_id ; tcp_offset]. "
             "Please pass --task-id-key explicitly if auto-detection failed."
