@@ -160,6 +160,11 @@ def make_pi05_pre_post_processors(
             source_keys=aic_state_source_keys,
             output_key=OBS_STATE,
             drop_source_keys=True,
+            source_feature_shapes={
+                key: tuple(config.input_features[key].shape)
+                for key in aic_state_source_keys
+                if key in config.input_features
+            },
         )
 
     # OpenPI order: raw → relative → normalize → model → unnormalize → absolute

@@ -77,6 +77,11 @@ def make_act_pre_post_processors(
             source_keys=[*task_id_source_keys, *tcp_offset_source_keys],
             output_key=OBS_STATE,
             drop_source_keys=True,
+            source_feature_shapes={
+                key: tuple(config.input_features[key].shape)
+                for key in [*task_id_source_keys, *tcp_offset_source_keys]
+                if key in config.input_features
+            },
         )
 
     input_steps = [

@@ -98,6 +98,7 @@ class ConcatObservationKeysProcessorStep(ObservationProcessorStep):
     source_keys: list[str] = field(default_factory=list)
     output_key: str = ""
     drop_source_keys: bool = True
+    source_feature_shapes: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
     def _prepare_tensors(self, observation: dict[str, Any]) -> list[torch.Tensor]:
         tensors = [torch.as_tensor(observation[key]) for key in self.source_keys]
@@ -110,7 +111,12 @@ class ConcatObservationKeysProcessorStep(ObservationProcessorStep):
                 continue
 
             if tensor.ndim == 1:
-                if batch_size is not None and tensor.shape[0] == batch_size:
+                feature_shape = self.source_feature_shapes.get(self.source_keys[len(prepared)])
+                feature_shape = tuple(feature_shape) if feature_shape is not None else ()
+                is_scalar_feature = feature_shape == (1,)
+                if is_scalar_feature:
+                    prepared.append(tensor.reshape(-1, 1))
+                elif batch_size is not None and tensor.shape[0] == batch_size:
                     prepared.append(tensor.reshape(batch_size, 1))
                 else:
                     prepared.append(tensor.reshape(1, -1))
@@ -141,6 +147,7 @@ class ConcatObservationKeysProcessorStep(ObservationProcessorStep):
             "source_keys": self.source_keys,
             "output_key": self.output_key,
             "drop_source_keys": self.drop_source_keys,
+            "source_feature_shapes": self.source_feature_shapes,
         }
 
     def transform_features(
