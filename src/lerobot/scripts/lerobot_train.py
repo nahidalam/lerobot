@@ -78,12 +78,14 @@ AIC_OBS_TCP_OFFSET_PREFIX = "observation.tcp_offset."
 def _needs_current_aic_processors(policy_cfg: Any) -> bool:
     input_features = getattr(policy_cfg, "input_features", None) or {}
     return (
-        getattr(policy_cfg, "type", None) == "pi05"
+        getattr(policy_cfg, "type", None) in {"pi05", "smolvla"}
         and OBS_STATE in input_features
         and any(
             key == AIC_TCP_OFFSET_INPUT_KEY
             or key == AIC_OBS_TCP_OFFSET_KEY
+            or key == AIC_ACTION_OFFSET_KEY
             or key.startswith(AIC_OBS_TCP_OFFSET_PREFIX)
+            or key.startswith("action.tcp_offset.")
             for key in input_features
         )
     )
@@ -393,7 +395,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         processor_pretrained_path = None
     if _needs_current_aic_processors(cfg.policy) and processor_pretrained_path is not None and not cfg.resume:
         logging.warning(
-            "AIC Pi0.5 training needs dataset-aware processors to build observation.state from "
+            "AIC VLA training needs dataset-aware processors to build observation.state from "
             "AIC tcp_offset keys and tokenize dataset task instructions. Building processors from the "
             "current policy config instead of loading pretrained processor JSON."
         )

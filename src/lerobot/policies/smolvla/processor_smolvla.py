@@ -20,20 +20,43 @@ import torch
 
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
+    CastObservationKeysProcessorStep,
+    ConcatObservationKeysProcessorStep,
     DeviceProcessorStep,
     NewLineTaskProcessorStep,
     NormalizerProcessorStep,
     PolicyAction,
     PolicyProcessorPipeline,
     RenameObservationsProcessorStep,
+    SelectObservationKeysProcessorStep,
     TokenizerProcessorStep,
     UnnormalizerProcessorStep,
     policy_action_to_transition,
     transition_to_policy_action,
 )
-from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
+from lerobot.utils.constants import OBS_STATE, POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
 
 from .configuration_smolvla import SmolVLAConfig
+
+
+def _resolve_aic_state_sources(config: SmolVLAConfig) -> tuple[list[str], list[str]]:
+    input_features = config.input_features or {}
+    if OBS_STATE not in input_features:
+        return [], []
+
+    task_id_source_keys = sorted(
+        key
+        for key in input_features
+        if key.startswith("observation.task_id.") or key in {"observation.task_id", "task_id"}
+    )
+    tcp_offset_source_keys = sorted(
+        key
+        for key in input_features
+        if key.startswith("observation.tcp_offset.")
+        or key.startswith("action.tcp_offset.")
+        or key in {"observation.tcp_offset", "action.tcp_offset"}
+    )
+    return task_id_source_keys, tcp_offset_source_keys
 
 
 def make_smolvla_pre_post_processors(
@@ -66,23 +89,50 @@ def make_smolvla_pre_post_processors(
         A tuple containing the configured pre-processor and post-processor pipelines.
     """
 
+    task_id_source_keys, tcp_offset_source_keys = _resolve_aic_state_sources(config)
+    aic_state_source_keys = [*task_id_source_keys, *tcp_offset_source_keys]
+    normalize_observation_keys = None
+    concat_step = None
+
+    if aic_state_source_keys:
+        normalize_observation_keys = set(config.image_features) | set(tcp_offset_source_keys)
+        concat_step = ConcatObservationKeysProcessorStep(
+            source_keys=aic_state_source_keys,
+            output_key=OBS_STATE,
+            drop_source_keys=True,
+            source_feature_shapes={
+                key: tuple(config.input_features[key].shape)
+                for key in aic_state_source_keys
+                if key in config.input_features
+            },
+        )
+
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),  # To mimic the same processor as pretrained one
+        SelectObservationKeysProcessorStep(keep_keys=sorted(config.input_features or {})),
+        CastObservationKeysProcessorStep(cast_keys=aic_state_source_keys),
         AddBatchDimensionProcessorStep(),
-        NewLineTaskProcessorStep(),
-        TokenizerProcessorStep(
-            tokenizer_name=config.vlm_model_name,
-            padding=config.pad_language_to,
-            padding_side="right",
-            max_length=config.tokenizer_max_length,
-        ),
-        DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(
             features={**config.input_features, **config.output_features},
             norm_map=config.normalization_mapping,
             stats=dataset_stats,
+            normalize_observation_keys=normalize_observation_keys,
         ),
     ]
+    if concat_step is not None:
+        input_steps.append(concat_step)
+    input_steps.extend(
+        [
+            NewLineTaskProcessorStep(),
+            TokenizerProcessorStep(
+                tokenizer_name=config.vlm_model_name,
+                padding=config.pad_language_to,
+                padding_side="right",
+                max_length=config.tokenizer_max_length,
+            ),
+            DeviceProcessorStep(device=config.device),
+        ]
+    )
     output_steps = [
         UnnormalizerProcessorStep(
             features=config.output_features, norm_map=config.normalization_mapping, stats=dataset_stats
